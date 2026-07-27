@@ -98,6 +98,7 @@ jobs:
         run: |
           ./scripts/test-naming-guard.sh
           ./scripts/check-no-seasclick.sh
+          ./scripts/test-release-binary.sh
 
       - name: Build extension (no TLS)
         run: |

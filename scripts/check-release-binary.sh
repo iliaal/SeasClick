@@ -76,7 +76,19 @@ check_macos_minimum() {
 	}
 	versions=$(
 		otool -l "${binary}" |
-			awk '$1 == "minos" || $1 == "version" {print $2}'
+			awk '
+        $1 == "cmd" {
+          load_command = $2;
+          next;
+        }
+        load_command == "LC_BUILD_VERSION" && $1 == "minos" {
+          print $2;
+          next;
+        }
+        load_command ~ /^LC_VERSION_MIN_/ && $1 == "version" {
+          print $2;
+        }
+      '
 	)
 	[[ -n "${versions}" ]] || {
 		printf 'No macOS deployment target found in %s\n' "${binary}" >&2
@@ -111,9 +123,9 @@ main() {
 	}
 
 	case "${mode}" in
-	--linux-glibc) check_linux_glibc "${maximum}" "${binary}" ;;
-	--macos-min) check_macos_minimum "${maximum}" "${binary}" ;;
-	*) usage ;;
+		--linux-glibc) check_linux_glibc "${maximum}" "${binary}" ;;
+		--macos-min) check_macos_minimum "${maximum}" "${binary}" ;;
+		*) usage ;;
 	esac
 }
 
