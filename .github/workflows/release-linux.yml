@@ -119,6 +119,8 @@ jobs:
 
       - name: Verify release binary compatibility
         env:
+          COMPAT_MAXIMUM: ${{ matrix.platform.compat_maximum }}
+          COMPAT_MODE: ${{ matrix.platform.compat_mode }}
           PACKAGE_PATH: ${{ steps.prebuilt.outputs.package-path }}
         run: |
           binary="$PWD/modules/clickhouse.so"
@@ -129,6 +131,6 @@ jobs:
             binary="$archive_dir/clickhouse.so"
           fi
           scripts/check-release-binary.sh \
-            '${{ matrix.platform.compat_mode }}' \
-            '${{ matrix.platform.compat_maximum }}' \
+            "$COMPAT_MODE" \
+            "$COMPAT_MAXIMUM" \
             "$binary"
