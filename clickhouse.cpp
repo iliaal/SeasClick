@@ -37,11 +37,16 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/client.h"
 #include "lib/clickhouse-cpp/clickhouse/error_codes.h"
 #include "lib/clickhouse-cpp/clickhouse/exceptions.h"
+#include "lib/clickhouse-cpp/clickhouse/base/output.h"
 #include "lib/clickhouse-cpp/clickhouse/types/type_parser.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/factory.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/json.h"
+#include "lib/clickhouse-cpp/clickhouse/columns/string.h"
 #include "typesToPhp.hpp"
+#include <algorithm>
 #include <chrono>
 #include <deque>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 
@@ -450,6 +455,140 @@ struct DerefZvalHold {
     DerefZvalHold& operator=(const DerefZvalHold&) = delete;
 };
 
+struct RowsSnapshot {
+    zval value;
+
+    explicit RowsSnapshot(HashTable *rows) {
+        array_init_size(&value, zend_hash_num_elements(rows));
+        zval *row;
+        ZEND_HASH_FOREACH_VAL(rows, row) {
+            zval copy;
+            ZVAL_COPY_DEREF(&copy, row);
+            add_next_index_zval(&value, &copy);
+        } ZEND_HASH_FOREACH_END();
+    }
+    ~RowsSnapshot() {
+        zval_ptr_dtor(&value);
+    }
+    HashTable *get() {
+        return Z_ARRVAL(value);
+    }
+    RowsSnapshot(const RowsSnapshot&) = delete;
+    RowsSnapshot& operator=(const RowsSnapshot&) = delete;
+};
+
+static size_t saturatingAddSize(size_t left, size_t right)
+{
+    return right > std::numeric_limits<size_t>::max() - left
+        ? std::numeric_limits<size_t>::max()
+        : left + right;
+}
+
+static size_t saturatingMulSize(size_t left, size_t right)
+{
+    if (left == 0 || right == 0) {
+        return 0;
+    }
+    return left > std::numeric_limits<size_t>::max() / right
+        ? std::numeric_limits<size_t>::max()
+        : left * right;
+}
+
+class CountingOutput final : public OutputStream {
+public:
+    size_t size = 0;
+
+protected:
+    size_t DoWrite(const void *, size_t len) override {
+        size = saturatingAddSize(size, len);
+        return len;
+    }
+};
+
+static size_t retainedColumnPayloadBytes(const ColumnRef &column)
+{
+    switch (column->GetType().GetCode()) {
+        case Type::String: {
+            auto strings = column->As<ColumnString>();
+            if (!strings) {
+                throw std::runtime_error("String column has unexpected representation");
+            }
+            size_t bytes = saturatingMulSize(
+                strings->Size(), sizeof(std::string_view));
+            for (size_t row = 0; row < strings->Size(); ++row) {
+                bytes = saturatingAddSize(bytes, strings->At(row).size());
+            }
+            return bytes;
+        }
+        case Type::FixedString: {
+            auto strings = column->As<ColumnFixedString>();
+            if (!strings) {
+                throw std::runtime_error("FixedString column has unexpected representation");
+            }
+            return saturatingMulSize(strings->Size(), strings->FixedSize());
+        }
+        case Type::JSON: {
+            auto json = column->As<ColumnJSON>();
+            if (!json) {
+                throw std::runtime_error("JSON column has unexpected representation");
+            }
+            size_t bytes = saturatingMulSize(
+                json->Size(), sizeof(std::string_view));
+            for (size_t row = 0; row < json->Size(); ++row) {
+                bytes = saturatingAddSize(bytes, json->At(row).size());
+            }
+            return bytes;
+        }
+        case Type::Int8:
+        case Type::Int16:
+        case Type::Int32:
+        case Type::Int64:
+        case Type::UInt8:
+        case Type::UInt16:
+        case Type::UInt32:
+        case Type::UInt64:
+        case Type::Float32:
+        case Type::Float64:
+        case Type::DateTime:
+        case Type::Date:
+        case Type::Enum8:
+        case Type::Enum16:
+        case Type::UUID:
+        case Type::IPv4:
+        case Type::IPv6:
+        case Type::Int128:
+        case Type::UInt128:
+        case Type::Decimal:
+        case Type::Decimal32:
+        case Type::Decimal64:
+        case Type::Decimal128:
+        case Type::DateTime64:
+        case Type::Date32:
+        case Type::Time:
+        case Type::Time64:
+        case Type::Bool:
+            return 0;
+        default: {
+            CountingOutput output;
+            column->Save(&output);
+            return output.size;
+        }
+    }
+}
+
+static size_t estimateRetainedBlockBytes(const Block &block)
+{
+    size_t payload = 0;
+    for (size_t column = 0; column < block.GetColumnCount(); ++column) {
+        payload = saturatingAddSize(
+            payload, retainedColumnPayloadBytes(block[column]));
+    }
+    size_t cells = saturatingMulSize(
+        block.GetRowCount(), block.GetColumnCount());
+    size_t structural_floor = saturatingMulSize(cells, 32);
+    return std::max(payload, structural_floor);
+}
+
 #ifdef COMPILE_DL_CLICKHOUSE
 extern "C" {
 #ifdef ZTS
@@ -782,6 +921,9 @@ PHP_METHOD(ClickHouse, __construct)
     /* php_array_get_value is a string-literal-only macro (it uses
      * sizeof(str)-1 for the key length) so it can't be passed a const
      * char* runtime key. The lambda goes through zend_hash_str_find. */
+    auto unsigned_max_as_zend_long = [](uint64_t max) -> zend_long {
+        return max > (uint64_t)ZEND_LONG_MAX ? ZEND_LONG_MAX : (zend_long)max;
+    };
     auto load_bounded_nonneg_long = [&](const char *key, zend_long max, zend_long &out) -> bool {
         zval *v = zend_hash_str_find(_ht, (char*)key, strlen(key));
         if (!v || ZVAL_IS_NULL(v)) return false;
@@ -803,7 +945,8 @@ PHP_METHOD(ClickHouse, __construct)
     }
     {
         zend_long n;
-        if (load_bounded_nonneg_long("retry_count", (zend_long)UINT_MAX, n)) {
+        if (load_bounded_nonneg_long(
+                "retry_count", unsigned_max_as_zend_long(UINT_MAX), n)) {
             sc_zend_update_property_long(clickhouse_ce, this_obj, "retry_count", sizeof("retry_count") - 1, n);
         } else if (EG(exception)) { return; }
     }
@@ -877,8 +1020,12 @@ PHP_METHOD(ClickHouse, __construct)
             return true;
         };
         if (!apply_timeout_ms("connect_timeout_ms", INT_MAX, &ClientOptions::SetConnectionConnectTimeout)) return;
-        if (!apply_timeout_ms("receive_timeout_ms", (zend_long)UINT_MAX, &ClientOptions::SetConnectionRecvTimeout)) return;
-        if (!apply_timeout_ms("send_timeout_ms", (zend_long)UINT_MAX, &ClientOptions::SetConnectionSendTimeout)) return;
+        if (!apply_timeout_ms(
+                "receive_timeout_ms", unsigned_max_as_zend_long(UINT_MAX),
+                &ClientOptions::SetConnectionRecvTimeout)) return;
+        if (!apply_timeout_ms(
+                "send_timeout_ms", unsigned_max_as_zend_long(UINT_MAX),
+                &ClientOptions::SetConnectionSendTimeout)) return;
         if (php_array_get_value(_ht, "tcp_nodelay", value)) {
             Options = Options.TcpNoDelay(zend_is_true(value));
         }
@@ -964,7 +1111,8 @@ PHP_METHOD(ClickHouse, __construct)
                 if (Z_TYPE_P(value) == IS_STRING) {
                     files.emplace_back(Z_STRVAL_P(value), Z_STRLEN_P(value));
                 } else if (Z_TYPE_P(value) == IS_ARRAY) {
-                    HashTable *fh = Z_ARRVAL_P(value);
+                    DerefZvalHold files_hold(value);
+                    HashTable *fh = Z_ARRVAL_P(files_hold.get());
                     zval *fv;
                     ZEND_HASH_FOREACH_VAL(fh, fv) {
                         ZStrGuard sg(fv);
@@ -998,7 +1146,8 @@ PHP_METHOD(ClickHouse, __construct)
                 return;
             }
             std::vector<Endpoint> eps;
-            HashTable *eps_ht = Z_ARRVAL_P(value);
+            DerefZvalHold endpoints_hold(value);
+            HashTable *eps_ht = Z_ARRVAL_P(endpoints_hold.get());
             zval *ep_zv;
             ZEND_HASH_FOREACH_VAL(eps_ht, ep_zv) {
                 ZVAL_DEREF(ep_zv);
@@ -2201,7 +2350,8 @@ static void applyPlaceholders(string &sql, HashTable *params_ht, std::vector<Typ
          *     "a, b" turned into a cross join in scan.md's repro). */
         std::string repl;
         if (Z_TYPE_P(pzval) == IS_ARRAY) {
-            HashTable *aht = Z_ARRVAL_P(pzval);
+            DerefZvalHold values_hold(pzval);
+            HashTable *aht = Z_ARRVAL_P(values_hold.get());
             if (zend_hash_num_elements(aht) == 0) {
                 throw std::runtime_error(
                     "Placeholder value for {" + name + "} is invalid: empty array");
@@ -2270,17 +2420,18 @@ static void attachTypedParams(Query &q, const std::vector<TypedParam> &params)
  * Shared prelude for select / execute / stream paths after getClient +
  * QueryActiveGuard: reset stats, reject mid-insert, apply placeholders,
  * attach settings/progress/profile/verbose callbacks. sql_s is the SQL
- * after placeholder rewrite; log_sql tracks the same for error logging.
+ * after placeholder rewrite; log_sql remains the caller's original text
+ * for logging and verbose events.
  * params_err_msg: if non-null, a non-array params zval throws that text;
  * if null, non-array params are ignored (optional-arg paths).
  */
-static std::string prepareQuery(clickhouse_object *obj,
-                                std::string &log_sql,
-                                const std::string &qid,
-                                zval *params,
-                                zval *settings,
-                                Query &query,
-                                const char *params_err_msg)
+static void prepareQuery(clickhouse_object *obj,
+                         std::string &log_sql,
+                         const std::string &qid,
+                         zval *params,
+                         zval *settings,
+                         Query &query,
+                         const char *params_err_msg)
 {
     resetStats(obj);
     obj->stats.last_query_id = qid;
@@ -2307,7 +2458,6 @@ static std::string prepareQuery(clickhouse_object *obj,
     applyMergedSettings(query, obj, settings);
     attachProgressAndProfile(query, obj);
     attachVerbose(query, obj);
-    return sql_s;
 }
 
 /*
@@ -2430,14 +2580,13 @@ static void do_select_into(zval *out, zval *this_obj,
         QueryActiveGuard guard(obj);
 
         Query query;
-        std::string sql_s = prepareQuery(
-            obj, log_sql, qid, params, settings, query,
-            "The second argument to the select function must be an array");
+        prepareQuery(obj, log_sql, qid, params, settings, query,
+                     "The second argument to the select function must be an array");
 
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
-            add_assoc_stringl(&ctx, "sql", (char*)sql_s.data(), sql_s.size());
+            add_assoc_stringl(&ctx, "sql", (char*)log_sql.data(), log_sql.size());
             add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
             add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
             add_assoc_long(&ctx, "fetch_mode", (zend_long)fetch_mode);
@@ -2608,7 +2757,7 @@ static void do_select_into(zval *out, zval *this_obj,
             add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
-        recordQuerySuccess(obj, sql_s, qid);
+        recordQuerySuccess(obj, log_sql, qid);
     }
     catch (const std::exception& e)
     {
@@ -2716,18 +2865,11 @@ static Block buildExternalTableBlock(zval *entry, std::string &name_out)
      * the external-table descriptor. Own the dereferenced arrays until the
      * native block is complete so their HashTables and keys cannot disappear
      * under the per-column walk. */
-    struct ZvalHold {
-        zval value;
-        explicit ZvalHold(zval *source) { ZVAL_COPY(&value, source); }
-        ~ZvalHold() { zval_ptr_dtor(&value); }
-        ZvalHold(const ZvalHold &) = delete;
-        ZvalHold &operator=(const ZvalHold &) = delete;
-    };
-    ZvalHold columns_hold(columns_zv);
-    ZvalHold rows_hold(rows_zv);
+    DerefZvalHold columns_hold(columns_zv);
+    RowsSnapshot rows_hold(Z_ARRVAL_P(rows_zv));
 
-    HashTable *columns_ht = Z_ARRVAL(columns_hold.value);
-    HashTable *rows_ht    = Z_ARRVAL(rows_hold.value);
+    HashTable *columns_ht = Z_ARRVAL_P(columns_hold.get());
+    HashTable *rows_ht    = rows_hold.get();
     size_t columns_count  = zend_hash_num_elements(columns_ht);
     if (columns_count == 0) {
         throw std::runtime_error("external table '" + name_out + "' has no columns");
@@ -3067,12 +3209,21 @@ static zend_long do_select_to_stream(zval *this_obj,
         QueryActiveGuard guard(obj);
 
         Query query;
-        std::string sql_s = prepareQuery(
-            obj, log_sql, qid, params, settings, query,
-            "The second argument to selectToStream must be an array");
+        prepareQuery(obj, log_sql, qid, params, settings, query,
+                     "The second argument to selectToStream must be an array");
+
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_stringl(&ctx, "sql", (char*)log_sql.data(), log_sql.size());
+            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
+            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
+            emitVerbose(obj, "select_start", &ctx);
+        }
 
         bool header_written = false;
         smart_str buf = {0};
+        size_t verbose_block_idx = 0;
         const long fetch_mode = SC_FETCH_DATE_AS_STRINGS | SC_FETCH_ONE;
         const char *row_term  = streamFormatIsCSV(fmt) ? "\r\n" : "\n";
         const size_t row_term_len = streamFormatIsCSV(fmt) ? 2 : 1;
@@ -3082,6 +3233,14 @@ static zend_long do_select_to_stream(zval *this_obj,
             const size_t col_count = block.GetColumnCount();
             const size_t row_count = block.GetRowCount();
             if (col_count == 0) return;
+            if (verbose_active(obj)) {
+                zval ctx;
+                array_init(&ctx);
+                add_assoc_long(&ctx, "rows", (zend_long)row_count);
+                add_assoc_long(&ctx, "columns", (zend_long)col_count);
+                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
+                emitVerbose(obj, "data_block", &ctx);
+            }
 
             if (!header_written) {
                 /* Validate types once, against the first non-empty block.
@@ -3140,7 +3299,16 @@ static zend_long do_select_to_stream(zval *this_obj,
                               [&buf]() { smart_str_free(&buf); });
         flushStreamBuf(&buf, stream_zv);
         smart_str_free(&buf);
-        recordQuerySuccess(obj, sql_s, qid);
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
+            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
+            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
+            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            emitVerbose(obj, "select_finish", &ctx);
+        }
+        recordQuerySuccess(obj, log_sql, qid);
     }
     catch (const std::exception &e)
     {
@@ -3246,7 +3414,7 @@ PHP_METHOD(ClickHouse, selectStatement)
 
     /* DR-015: a Statement always materializes full rows for array/iterator
      * access, so only the value-shaping flags (DATE_AS_STRINGS, JSON_AS_*,
-     * UUID_WITH_DASHES, FIXEDSTRING_BINARY) apply; row-shape flags
+     * UUID_WITH_DASHES, FIXEDSTRING_BINARY, MAP_AS_PAIRS) apply; row-shape flags
      * (FETCH_ONE / KEY_PAIR / COLUMN) are ignored, as on the stream readers. */
     do_select_into(&stmt->rows, getThis(), ZSTR_VAL(sql), ZSTR_LEN(sql), params,
                    fetch_mode & SC_FETCH_VALUE_FLAGS, qid, settings, NULL, &stmt->positional_rows);
@@ -3382,7 +3550,8 @@ static void do_insert_into(zval *this_obj, zend_string *table,
         }
 
         HashTable *columns_ht = Z_ARRVAL_P(columns);
-        HashTable *values_ht = Z_ARRVAL_P(values);
+        RowsSnapshot values_hold(Z_ARRVAL_P(values));
+        HashTable *values_ht = values_hold.get();
         size_t columns_count = zend_hash_num_elements(columns_ht);
 
         /* Materialize the column-name list once, validating each entry is
@@ -4335,7 +4504,8 @@ PHP_METHOD(ClickHouse, write)
             throw std::runtime_error("write() called without a matching writeStart()");
         }
 
-        HashTable *values_ht = Z_ARRVAL_P(values);
+        RowsSnapshot values_hold(Z_ARRVAL_P(values));
+        HashTable *values_ht = values_hold.get();
         if (zend_hash_num_elements(values_ht) == 0) {
             /* Appending zero rows is a no-op, not an error. Throwing here
              * would tear down the in-flight insert over a benign empty
@@ -4445,6 +4615,7 @@ PHP_METHOD(ClickHouse, write)
  */
 PHP_METHOD(ClickHouse, writeEnd)
 {
+    if (zend_parse_parameters_none() == FAILURE) return;
     clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
     std::string sql;
     std::string qid;
@@ -4517,14 +4688,13 @@ static void do_execute_into(zval *this_obj,
         QueryActiveGuard guard(obj);
 
         Query query;
-        std::string sql_s = prepareQuery(
-            obj, log_sql, qid, params, settings, query,
-            "The second argument to execute must be an array");
+        prepareQuery(obj, log_sql, qid, params, settings, query,
+                     "The second argument to execute must be an array");
 
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
-            add_assoc_stringl(&ctx, "sql", (char*)sql_s.data(), sql_s.size());
+            add_assoc_stringl(&ctx, "sql", (char*)log_sql.data(), log_sql.size());
             add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
             add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
             emitVerbose(obj, "execute_start", &ctx);
@@ -4537,7 +4707,7 @@ static void do_execute_into(zval *this_obj,
             add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
             emitVerbose(obj, "execute_finish", &ctx);
         }
-        recordQuerySuccess(obj, sql_s, qid);
+        recordQuerySuccess(obj, log_sql, qid);
     }
     catch (const std::exception& e)
     {
@@ -5325,11 +5495,30 @@ PHP_METHOD(ClickHouse, selectStream)
         QueryActiveGuard guard(obj);
 
         Query query;
-        std::string sql_s = prepareQuery(obj, log_sql, qid, params, settings, query,
-                                         /*params_err_msg=*/nullptr);
+        prepareQuery(obj, log_sql, qid, params, settings, query,
+                     /*params_err_msg=*/nullptr);
 
-        query.OnData([iter](const Block &block) {
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_stringl(&ctx, "sql", (char*)log_sql.data(), log_sql.size());
+            add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
+            add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
+            add_assoc_long(&ctx, "fetch_mode", (zend_long)fetch_mode);
+            emitVerbose(obj, "select_start", &ctx);
+        }
+
+        size_t verbose_block_idx = 0;
+        query.OnData([iter, obj, &verbose_block_idx](const Block &block) {
             if (block.GetRowCount() == 0 || block.GetColumnCount() == 0) return;
+            if (verbose_active(obj)) {
+                zval ctx;
+                array_init(&ctx);
+                add_assoc_long(&ctx, "rows", (zend_long)block.GetRowCount());
+                add_assoc_long(&ctx, "columns", (zend_long)block.GetColumnCount());
+                add_assoc_long(&ctx, "block_index", (zend_long)verbose_block_idx++);
+                emitVerbose(obj, "data_block", &ctx);
+            }
             /* Cache column names on the first non-empty block. The schema
              * is identical across all blocks in a single result, so we
              * pay one std::string copy per column, once, instead of one
@@ -5341,33 +5530,39 @@ PHP_METHOD(ClickHouse, selectStream)
                     iter->column_names.emplace_back(block.GetColumnName(c));
                 }
             }
-            /* selectStream buffers native blocks on the C++ heap (not under
-             * PHP zval accounting). Charge a conservative per-cell floor and
-             * refuse to grow past memory_limit so large SELECTs fail loudly
-             * instead of OOMing the worker. Prefer selectStreamCallback for
-             * true unbounded streaming. */
-            const size_t kCellFloor = 32;
-            size_t incoming = (size_t)block.GetRowCount()
-                * (size_t)block.GetColumnCount() * kCellFloor;
             zend_long configured = PG(memory_limit);
+            size_t incoming = 0;
             if (configured > 0) {
+                incoming = estimateRetainedBlockBytes(block);
                 size_t limit = (size_t)configured;
-                if (iter->buffered_estimate > limit ||
-                    incoming > limit - iter->buffered_estimate) {
+                size_t php_used = zend_memory_usage(1);
+                if (php_used >= limit ||
+                    iter->buffered_estimate > limit - php_used ||
+                    incoming > limit - php_used - iter->buffered_estimate) {
                     throw std::runtime_error(
                         "selectStream: buffered result exceeds PHP memory_limit; "
                         "use selectStreamCallback() for unbounded streaming or "
                         "raise memory_limit");
                 }
             }
-            iter->buffered_estimate += incoming;
+            iter->buffered_estimate =
+                saturatingAddSize(iter->buffered_estimate, incoming);
             iter->total_rows += block.GetRowCount();
             iter->blocks.push_back(block);
         });
 
         runSelectWithRecovery(client, query, getThis(), obj, nullptr,
                               /*detach_callbacks=*/true);
-        recordQuerySuccess(obj, sql_s, qid);
+        if (verbose_active(obj)) {
+            zval ctx;
+            array_init(&ctx);
+            add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
+            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
+            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
+            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            emitVerbose(obj, "select_finish", &ctx);
+        }
+        recordQuerySuccess(obj, log_sql, qid);
     }
     catch (const std::exception &e) {
         recordQueryError(obj, log_sql, qid, e);
@@ -5420,13 +5615,13 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
         QueryActiveGuard guard(obj);
 
         Query query;
-        std::string sql_s = prepareQuery(obj, log_sql, qid, params, settings, query,
-                                         /*params_err_msg=*/nullptr);
+        prepareQuery(obj, log_sql, qid, params, settings, query,
+                     /*params_err_msg=*/nullptr);
 
         if (verbose_active(obj)) {
             zval ctx;
             array_init(&ctx);
-            add_assoc_stringl(&ctx, "sql", (char*)sql_s.data(), sql_s.size());
+            add_assoc_stringl(&ctx, "sql", (char*)log_sql.data(), log_sql.size());
             add_assoc_stringl(&ctx, "query_id", (char*)qid.data(), qid.size());
             add_assoc_long(&ctx, "settings_count", (zend_long)obj->settings.size());
             emitVerbose(obj, "select_start", &ctx);
@@ -5496,7 +5691,7 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
             add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
-        recordQuerySuccess(obj, sql_s, qid);
+        recordQuerySuccess(obj, log_sql, qid);
     }
     catch (const std::exception &e) {
         recordQueryError(obj, log_sql, qid, e);

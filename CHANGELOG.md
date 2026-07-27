@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ClickHouse::MAP_AS_PAIRS` provides a lossless `Map` representation as ordered `[key, value]` pairs. Default associative decoding now rejects duplicate or numeric-string keys instead of silently collapsing them.
+- Generic release archives are built on Ubuntu 22.04 for a GLIBC 2.35 ceiling, macOS binaries target macOS 12, and both lanes inspect the built binary metadata.
+
+### Changed
+
+- Benchmark results now use `Memory` tables, exclude setup/reset/warm-up, rotate client order, and report medians from four runs.
+- On 32-bit PHP, protocol integers that do not fit `zend_long` are returned as decimal strings instead of wrapping.
+
+### Fixed
+
+- Reentrant callbacks can no longer invalidate the outer endpoint, TLS CA-file, placeholder, insert, external-data, or streaming-write arrays while native code is iterating them.
+- `selectStream()` and `selectToStream()` emit the same verbose start, block, and finish lifecycle as the other select entry points.
+- Query logs and verbose events retain the placeholder SQL template instead of recording substituted literals.
+- `writeEnd()` rejects surplus arguments.
+- Streaming result memory checks account for retained native column payload sizes instead of relying only on a per-cell estimate.
+- The legacy-name guard scans its full intended shell-script surface, and its only exception is the guard's own compatibility literals.
+
 ## [0.10.0] - 2026-07-09
 
 ### Added

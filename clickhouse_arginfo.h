@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: f48d5a5a610120dfd9ac4a88c1284acbc7a84fba */
+ * Stub hash: 0e4d46eb3a41f6038fffeeff01df36271d6b646c */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -460,6 +460,12 @@ static zend_class_entry *register_class_ClickHouse(void)
 	zend_string *const_FIXEDSTRING_BINARY_name = zend_string_init_interned("FIXEDSTRING_BINARY", sizeof("FIXEDSTRING_BINARY") - 1, 1);
 	zend_declare_typed_class_constant(class_entry, const_FIXEDSTRING_BINARY_name, &const_FIXEDSTRING_BINARY_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release(const_FIXEDSTRING_BINARY_name);
+
+	zval const_MAP_AS_PAIRS_value;
+	ZVAL_LONG(&const_MAP_AS_PAIRS_value, 256);
+	zend_string *const_MAP_AS_PAIRS_name = zend_string_init_interned("MAP_AS_PAIRS", sizeof("MAP_AS_PAIRS") - 1, 1);
+	zend_declare_typed_class_constant(class_entry, const_MAP_AS_PAIRS_name, &const_MAP_AS_PAIRS_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
+	zend_string_release(const_MAP_AS_PAIRS_name);
 
 	zval property_host_default_value;
 	zend_string *property_host_default_value_str = zend_string_init("127.0.0.1", strlen("127.0.0.1"), 1);

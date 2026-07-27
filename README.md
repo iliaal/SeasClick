@@ -116,24 +116,19 @@ Configuration keys, the full method list, per-type read/write rules, placeholder
 
 ## 📊 Benchmarks
 
-PHP 8.4.22 / ClickHouse 26.3.9.8 / localhost loopback / `Memory` table (no disk).
+PHP 8.4.23 / ClickHouse 26.6.2.81 / localhost loopback / `Memory` table (no disk).
 
-Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client. Each cell is total wall-clock seconds for `selectCount` queries plus a single bulk insert of `dataCount` rows.
+Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client. Each cell is the median of four runs and measures one bulk insert plus `selectCount` queries. Setup, reset, and warm-up are untimed; client order rotates between runs.
 
 | dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) |
 |---|---:|---:|---:|---:|
-| 10000 × 1 × 5000   | 0.112 | 0.085 | 0.074 | 0.023 |
-| 10000 × 1 × 5000   | 0.104 | 0.030 | 0.024 | 0.081 |
-| 10000 × 100 × 5000  | 0.298 | 0.263 | 0.209 | 0.218 |
-| 10000 × 100 × 10000 | 0.303 | 0.210 | 0.265 | 0.215 |
-| 1000 × 200 × 500   | 0.558 | 0.416 | 0.415 | 0.413 |
-| 1000 × 200 × 1000  | 0.611 | 0.408 | 0.410 | 0.395 |
-| 1000 × 500 × 500   | 1.428 | 1.063 | 0.976 | 0.982 |
-| 1000 × 500 × 1000  | 1.383 | 0.959 | 1.025 | 1.030 |
-| 1000 × 800 × 500   | 2.477 | 1.533 | 1.569 | 1.543 |
-| 1000 × 800 × 1000  | 2.498 | 1.588 | 1.563 | 1.519 |
+| 10000 × 1 × 5000 | 0.088 | 0.060 | 0.060 | 0.058 |
+| 10000 × 100 × 5000 | 1.092 | 0.332 | 0.300 | 0.294 |
+| 10000 × 100 × 10000 | 1.920 | 0.471 | 0.464 | 0.454 |
+| 1000 × 200 × 500 | 0.681 | 0.327 | 0.324 | 0.366 |
+| 1000 × 500 × 1000 | 2.245 | 0.880 | 0.894 | 0.876 |
 
-At high select counts the native binary protocol runs 30-40% faster than the HTTP client. On small bursts (`dataCount=10000, selectCount=1`), php_clickhouse with ZSTD or LZ4 is fastest. To reproduce, see [`bench/`](bench/).
+To reproduce the controlled comparison, see [`bench/`](bench/).
 
 ## 🔗 Native PHP extensions
 

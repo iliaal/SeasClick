@@ -32,7 +32,7 @@ trap 'rm -f -- "${_tmpfile:-}"' EXIT
 cd "${ROOT}"
 
 git ls-files -z --cached --others --exclude-standard -- \
-	'*.cpp' '*.hpp' '*.h' '*.m4' '*.yml' '*.json' '*.phpt' '*.inc' '*.php' \
+	'*.cpp' '*.hpp' '*.h' '*.m4' '*.yml' '*.json' '*.phpt' '*.inc' '*.php' '*.sh' \
 	>"${_tmpfile}"
 mapfile -d '' CANDIDATE_FILES <"${_tmpfile}"
 SOURCE_FILES=()
@@ -54,7 +54,7 @@ fi
 
 UNEXPECTED=$(printf '%s\n' "${RAW_MATCHES}" |
 	grep -v '^lib/clickhouse-cpp/' |
-	grep -v '^scripts/' |
+	grep -vE '^scripts/check-no-seasclick\.sh:' |
 	grep -vE '^php_clickhouse\.h:.*(Original SeasClick|RES_NAME_LEGACY|EXCEPTION_NAME_LEGACY|aliases for the original SeasClick)' |
 	grep -vE '^clickhouse\.cpp:.*(Original SeasClick|aliases for the original SeasClick)' |
 	grep -vE '^tests/_clickhouse\.inc:.*(seasclick_test_config|seasclick_skip_if_no_server)' |
