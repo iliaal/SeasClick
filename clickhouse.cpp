@@ -1825,6 +1825,16 @@ static void applyMergedSettings(Query &q, clickhouse_object *obj, zval *per_call
  * struct and (b) forward to the user's PHP progress callback if one is
  * registered. Stats reset happens at query start in the caller.
  */
+static void addAssocUInt64(zval *array, const char *key, uint64_t value)
+{
+    if (value <= (uint64_t)ZEND_LONG_MAX) {
+        add_assoc_long(array, key, (zend_long)value);
+        return;
+    }
+    std::string text = std::to_string(value);
+    add_assoc_stringl(array, key, text.data(), text.size());
+}
+
 static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
 {
     q.OnProgress([obj](const Progress &p) {
@@ -1839,11 +1849,11 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             zval args[1], retval;
             ZVAL_NULL(&retval);
             array_init(&args[0]);
-            add_assoc_long(&args[0], "rows", (zend_long)p.rows);
-            add_assoc_long(&args[0], "bytes", (zend_long)p.bytes);
-            add_assoc_long(&args[0], "total_rows", (zend_long)p.total_rows);
-            add_assoc_long(&args[0], "written_rows", (zend_long)p.written_rows);
-            add_assoc_long(&args[0], "written_bytes", (zend_long)p.written_bytes);
+            addAssocUInt64(&args[0], "rows", p.rows);
+            addAssocUInt64(&args[0], "bytes", p.bytes);
+            addAssocUInt64(&args[0], "total_rows", p.total_rows);
+            addAssocUInt64(&args[0], "written_rows", p.written_rows);
+            addAssocUInt64(&args[0], "written_bytes", p.written_bytes);
             /* Copy the callable before invoking it. A callback that
              * unregisters or replaces itself (setProgressCallback(null))
              * would dtor obj->progress_callback mid-call; for an array
@@ -1881,10 +1891,10 @@ static void attachProgressAndProfile(Query &q, clickhouse_object *obj)
             zval args[1], retval;
             ZVAL_NULL(&retval);
             array_init(&args[0]);
-            add_assoc_long(&args[0], "rows", (zend_long)pr.rows);
-            add_assoc_long(&args[0], "blocks", (zend_long)pr.blocks);
-            add_assoc_long(&args[0], "bytes", (zend_long)pr.bytes);
-            add_assoc_long(&args[0], "rows_before_limit", (zend_long)pr.rows_before_limit);
+            addAssocUInt64(&args[0], "rows", pr.rows);
+            addAssocUInt64(&args[0], "blocks", pr.blocks);
+            addAssocUInt64(&args[0], "bytes", pr.bytes);
+            addAssocUInt64(&args[0], "rows_before_limit", pr.rows_before_limit);
             add_assoc_bool(&args[0], "applied_limit", pr.applied_limit ? 1 : 0);
             add_assoc_bool(&args[0], "calculated_rows_before_limit", pr.calculated_rows_before_limit ? 1 : 0);
             /* Pin the callable across the call; see the OnProgress note. */
@@ -2733,9 +2743,8 @@ static void do_select_into(zval *out, zval *this_obj,
                             if (fetch_mode & SC_FETCH_COLUMN) {
                                 convertToZval(&row_tmp, block[0], row, "", 0, fetch_mode|SC_FETCH_ONE);
                                 break;
-                            } else {
-                                convertToZval(&row_tmp, block[column], row, col_names[column], 0, fetch_mode);
                             }
+                            convertToZval(&row_tmp, block[column], row, col_names[column], 0, fetch_mode);
                         }
                     }
                 } catch (...) {
@@ -2752,9 +2761,9 @@ static void do_select_into(zval *out, zval *this_obj,
             zval ctx;
             array_init(&ctx);
             add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
-            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
-            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
+            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
+            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
         recordQuerySuccess(obj, log_sql, qid);
@@ -2775,13 +2784,13 @@ static void do_select_into(zval *out, zval *this_obj,
 static void buildStatsArray(zval *out, const ClientStats &st)
 {
     array_init(out);
-    add_assoc_long(out, "rows_read", (zend_long)st.rows_read);
-    add_assoc_long(out, "bytes_read", (zend_long)st.bytes_read);
-    add_assoc_long(out, "total_rows", (zend_long)st.total_rows);
-    add_assoc_long(out, "written_rows", (zend_long)st.written_rows);
-    add_assoc_long(out, "written_bytes", (zend_long)st.written_bytes);
-    add_assoc_long(out, "blocks", (zend_long)st.blocks);
-    add_assoc_long(out, "rows_before_limit", (zend_long)st.rows_before_limit);
+    addAssocUInt64(out, "rows_read", st.rows_read);
+    addAssocUInt64(out, "bytes_read", st.bytes_read);
+    addAssocUInt64(out, "total_rows", st.total_rows);
+    addAssocUInt64(out, "written_rows", st.written_rows);
+    addAssocUInt64(out, "written_bytes", st.written_bytes);
+    addAssocUInt64(out, "blocks", st.blocks);
+    addAssocUInt64(out, "rows_before_limit", st.rows_before_limit);
     add_assoc_bool(out, "applied_limit", st.applied_limit ? 1 : 0);
     add_assoc_double(out, "elapsed_ms", st.elapsed_ms);
     add_assoc_stringl(out, "query_id", st.last_query_id.data(), st.last_query_id.size());
@@ -3303,9 +3312,9 @@ static zend_long do_select_to_stream(zval *this_obj,
             zval ctx;
             array_init(&ctx);
             add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
-            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
-            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
+            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
+            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
         recordQuerySuccess(obj, log_sql, qid);
@@ -3617,7 +3626,7 @@ static void do_insert_into(zval *this_obj, zend_string *table,
          * userland-reentrant insert on another client during this build
          * (a cell's __toString / jsonSerialize) can't inherit our relaxed
          * Nullable-build state and silently coerce NULL. */
-        InsertNullScopeGuard null_scope;
+        InsertConversionScopeGuard conversion_scope;
 
         try {
             Block blockInsert;
@@ -4251,7 +4260,7 @@ PHP_METHOD(ClickHouse, insertFromStream)
 
         /* DR-008: see do_insert_into — keep a reentrant insert on another
          * client from inheriting this build's relaxed allow-null state. */
-        InsertNullScopeGuard null_scope;
+        InsertConversionScopeGuard conversion_scope;
 
         /* Per-column packed-zval accumulators. One IS_ARRAY zval per
          * column; each insert from the row handler appends one cell. */
@@ -4531,7 +4540,7 @@ PHP_METHOD(ClickHouse, write)
 
         /* DR-008: see do_insert_into — keep a reentrant insert on another
          * client from inheriting this build's relaxed allow-null state. */
-        InsertNullScopeGuard null_scope;
+        InsertConversionScopeGuard conversion_scope;
 
         Block blockInsert;
         for (size_t index = 0; index < columns_count; ++index) {
@@ -5441,8 +5450,8 @@ PHP_METHOD(ClickHouse, getLogQueries)
         add_assoc_stringl(&entry, "sql", (char*)ql.sql.c_str(), ql.sql.size());
         add_assoc_stringl(&entry, "query_id", (char*)ql.query_id.c_str(), ql.query_id.size());
         add_assoc_double(&entry, "elapsed_ms", ql.elapsed_ms);
-        add_assoc_long(&entry, "rows_read", (zend_long)ql.rows_read);
-        add_assoc_long(&entry, "bytes_read", (zend_long)ql.bytes_read);
+        addAssocUInt64(&entry, "rows_read", ql.rows_read);
+        addAssocUInt64(&entry, "bytes_read", ql.bytes_read);
         add_assoc_long(&entry, "error_code", (zend_long)ql.error_code);
         add_assoc_stringl(&entry, "error_message",
             (char*)ql.error_message.c_str(), ql.error_message.size());
@@ -5557,9 +5566,9 @@ PHP_METHOD(ClickHouse, selectStream)
             zval ctx;
             array_init(&ctx);
             add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
-            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
-            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
+            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
+            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
         recordQuerySuccess(obj, log_sql, qid);
@@ -5686,9 +5695,9 @@ PHP_METHOD(ClickHouse, selectStreamCallback)
             zval ctx;
             array_init(&ctx);
             add_assoc_double(&ctx, "elapsed_ms", obj->stats.elapsed_ms);
-            add_assoc_long(&ctx, "rows_read", (zend_long)obj->stats.rows_read);
-            add_assoc_long(&ctx, "bytes_read", (zend_long)obj->stats.bytes_read);
-            add_assoc_long(&ctx, "blocks", (zend_long)verbose_block_idx);
+            addAssocUInt64(&ctx, "rows_read", obj->stats.rows_read);
+            addAssocUInt64(&ctx, "bytes_read", obj->stats.bytes_read);
+            addAssocUInt64(&ctx, "blocks", verbose_block_idx);
             emitVerbose(obj, "select_finish", &ctx);
         }
         recordQuerySuccess(obj, log_sql, qid);

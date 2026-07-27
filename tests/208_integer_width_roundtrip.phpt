@@ -1,5 +1,5 @@
 --TEST--
-Int64 and UInt32 preserve values outside the 32-bit PHP integer range
+Integer and DateTime reads preserve values outside the 32-bit PHP integer range
 --EXTENSIONS--
 clickhouse
 --SKIPIF--
@@ -23,16 +23,20 @@ $c->insert(
 );
 
 $row = $c->select(
-    "SELECT negative, positive, unsigned, plus_sign FROM test.integer_width"
+    "SELECT negative, positive, unsigned, plus_sign, " .
+    "toDateTime(4294967295) AS max_datetime " .
+    "FROM test.integer_width"
 )[0];
 echo (string)$row["negative"], "\n";
 echo (string)$row["positive"], "\n";
 echo (string)$row["unsigned"], "\n";
 echo (string)$row["plus_sign"], "\n";
+echo (string)$row["max_datetime"], "\n";
 $expectInt = PHP_INT_SIZE > 4;
 var_dump(is_int($row["negative"]) === $expectInt);
 var_dump(is_int($row["positive"]) === $expectInt);
 var_dump(is_int($row["unsigned"]) === $expectInt);
+var_dump(is_int($row["max_datetime"]) === $expectInt);
 
 $c->execute("DROP TABLE test.integer_width");
 ?>
@@ -41,6 +45,8 @@ $c->execute("DROP TABLE test.integer_width");
 2147483648
 4294967295
 1
+4294967295
+bool(true)
 bool(true)
 bool(true)
 bool(true)

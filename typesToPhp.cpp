@@ -225,12 +225,12 @@ struct AllowNullGuard {
 static thread_local int convert_depth = 0;
 static const int MAX_CONVERT_DEPTH = 32;
 
-InsertNullScopeGuard::InsertNullScopeGuard()
+InsertConversionScopeGuard::InsertConversionScopeGuard()
     : saved_null(g_allow_null_in_strict), saved_depth(convert_depth) {
     g_allow_null_in_strict = 0;
     convert_depth = 0;
 }
-InsertNullScopeGuard::~InsertNullScopeGuard() {
+InsertConversionScopeGuard::~InsertConversionScopeGuard() {
     g_allow_null_in_strict = saved_null;
     convert_depth = saved_depth;
 }
@@ -510,12 +510,6 @@ static UUID parseUUIDString(const char *s, size_t len, const char *error_msg)
 }
 
 /*
- * RAII guard that owns a zend_string* obtained from zval_get_string and
- * releases it in the destructor. Used at PHP-to-C boundaries where the
- * surrounding code can throw (validation, recursive insertColumn, etc.)
- * without forcing every site to write try { ... } catch { release; throw; }.
- */
-/*
  * Extract the width from a "FixedString(N)" type name. The previous
  * inline form did `typeName.erase(typeName.find("FixedString("), 12)` —
  * if find() returned npos, erase(npos, 12) is undefined. This helper
@@ -700,7 +694,7 @@ static int64_t pow10_i64(size_t precision)
 
 ColumnRef createColumn(TypeRef type)
 {
-    ConvertDepthGuard _depth_guard;
+    ConvertDepthGuard depth_guard;
     switch (type->GetCode())
     {
     case Type::Code::UInt64:
@@ -1546,7 +1540,7 @@ static void validateDecimalText(const std::string &s, size_t precision,
 
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
 {
-    ConvertDepthGuard _depth_guard;  // shared with createColumn / convertToZval
+    ConvertDepthGuard depth_guard;  // shared with createColumn / convertToZval
     zval *array_value;
     HashTable *values_ht = Z_ARRVAL_P(value_zval);
 
@@ -2561,7 +2555,7 @@ static void emitEpoch(zval *arr, std::time_t t, const char *fmt,
         size_t l = strftime(buffer, sizeof(buffer), fmt, &tmv);
         emitStringCell(arr, buffer, l, column_name, is_array, fetch_mode);
     } else {
-        emitLongCell(arr, (zend_long)t, column_name, is_array, fetch_mode);
+        emitSigned64Cell(arr, (int64_t)t, column_name, is_array, fetch_mode);
     }
 }
 
@@ -2665,7 +2659,7 @@ static void emitEnumColumn(zval *arr, const ColumnRef& columnRef, int row,
 
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
 {
-    ConvertDepthGuard _depth_guard;  // shared with createColumn / insertColumn
+    ConvertDepthGuard depth_guard;  // shared with createColumn / insertColumn
     switch (columnRef->Type()->GetCode())
     {
     case Type::Code::UInt64:
@@ -2851,7 +2845,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         auto col = (*fs_col)[row];
         size_t len = col.length();
         if (!(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
-            while (len > 0 && col.data()[len - 1] == '\0') {
+            while (len > 0 && col[len - 1] == '\0') {
                 --len;
             }
         }
@@ -3153,7 +3147,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         if (inner->GetCode() == Type::Code::FixedString &&
             !(fetch_mode & SC_FETCH_FIXEDSTRING_BINARY)) {
             size_t len = sv.length();
-            while (len > 0 && sv.data()[len - 1] == '\0') {
+            while (len > 0 && sv[len - 1] == '\0') {
                 --len;
             }
             sv = std::string_view(sv.data(), len);

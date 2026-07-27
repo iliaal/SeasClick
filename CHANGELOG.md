@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On 32-bit PHP, DateTime/Date32 reads and query statistics preserve values above `zend_long` as decimal strings instead of wrapping negative.
 - Reentrant callbacks can no longer invalidate the outer endpoint, TLS CA-file, placeholder, insert, external-data, or streaming-write arrays while native code is iterating them.
 - `selectStream()` and `selectToStream()` emit the same verbose start, block, and finish lifecycle as the other select entry points.
 - Query logs and verbose events retain the placeholder SQL template instead of recording substituted literals.

@@ -50,17 +50,17 @@ struct ZStrGuard {
  * second client can't inherit a first client's relaxed (Nullable-build)
  * state or elevated nest depth. Saves/restores to keep legitimate
  * same-thread nesting correct. */
-struct InsertNullScopeGuard {
+struct InsertConversionScopeGuard {
     int saved_null;
     int saved_depth;
-    InsertNullScopeGuard();
-    ~InsertNullScopeGuard();
-    InsertNullScopeGuard(const InsertNullScopeGuard&) = delete;
-    InsertNullScopeGuard& operator=(const InsertNullScopeGuard&) = delete;
+    InsertConversionScopeGuard();
+    ~InsertConversionScopeGuard();
+    InsertConversionScopeGuard(const InsertConversionScopeGuard&) = delete;
+    InsertConversionScopeGuard& operator=(const InsertConversionScopeGuard&) = delete;
 };
 
 /* Isolate convert_depth at top-level select entrypoints (same reentry
- * concern as InsertNullScopeGuard, without the null-strictness reset). */
+ * concern as InsertConversionScopeGuard, without the null-strictness reset). */
 struct ConvertDepthScopeGuard {
     int saved_depth;
     ConvertDepthScopeGuard();
