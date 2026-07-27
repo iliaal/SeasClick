@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-27
+
 ### Added
 
 - `ClickHouse::MAP_AS_PAIRS` provides a lossless `Map` representation as ordered `[key, value]` pairs. Default associative decoding rejects a `Map` whose entries would collapse onto the same PHP array key instead of silently dropping one.
@@ -16,7 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Benchmark results now use `Memory` tables, exclude setup/reset/warm-up, rotate client order, and report medians from four runs. The dataset varies per row instead of repeating one row, and an untimed row-count gate rejects a run where either client read back nothing.
 - On 32-bit PHP, protocol integers that do not fit `zend_long` are returned as decimal strings instead of wrapping.
-- `Float32` reads now return the exact value the server sent. The previous `%.6g` round-trip discarded significant digits — `toFloat32(123456789)` read back as `123457000` — so values print with their full binary expansion (`toFloat32(0.55)` is `0.550000011920929`, not `0.55`).
+- A `compression` setting of `2` now selects ZSTD. It was silently downgraded to LZ4. The option accepts `0`/`1`/`2`, `"none"`/`"lz4"`/`"zstd"`, and bool, and throws on anything else.
+- `Bool` inserts accept only `true`/`false`, `0`/`1`, and the strings `"true"`/`"false"`/`"0"`/`"1"`. The string `"false"` previously stored `true`.
+- Binding a PHP array to a `Map`, `Tuple`, or other composite typed parameter throws instead of emitting a malformed array literal. `Array(...)` parameters are capped at 32 levels of nesting.
+- Connection options (`retry_count`, the timeout family, `tcp_keepalive_*`, `max_compression_chunk_size`) reject values too wide for the native option they feed.
+- `Float32` reads return the exact value the server sent. The previous `%.6g` round-trip dropped significant digits, reading `toFloat32(123456789)` back as `123457000`. Values now print with their full binary expansion, so `toFloat32(0.55)` is `0.550000011920929`.
 - Inserting a `Float32` or `Float64` value outside the column's range now throws instead of storing `±INF`.
 - `Map` reads no longer accept a key that would collide with another entry once mapped into a PHP array; keys that do not collide keep the type they had in 0.10.0 (a canonical decimal string still becomes an integer key).
 
@@ -24,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On 32-bit PHP, DateTime/Date32 reads and query statistics preserve values above `zend_long` as decimal strings instead of wrapping negative.
 - Reentrant callbacks can no longer invalidate the outer endpoint, TLS CA-file, placeholder, insert, external-data, or streaming-write arrays while native code is iterating them.
+- `Date`, `Date32`, and `DateTime64` accept string timestamps before 1970, and reject invalid calendar dates such as `1900-02-29` that were previously normalised to a different day.
+- `ClickHouseStatement` participates in cycle collection, so a statement holding an object cell no longer leaks its rows until request shutdown.
+- The module declares its `json` dependency, so loading `clickhouse` before `json` no longer registers `ClickHouseStatement` against a null `JsonSerializable`.
+- `writeStart()` recovers the connection when installing insert state fails after the server has already opened the insert.
+- Abandoning a streaming insert against a dead peer no longer blocks teardown indefinitely when `receive_timeout` is `0`.
+- `Time` and `Time64` render their minimum representable values instead of relying on undefined signed negation.
 - `selectStream()` and `selectToStream()` emit the same verbose start, block, and finish lifecycle as the other select entry points.
 - Query logs and verbose events retain the placeholder SQL template instead of recording substituted literals.
 - `writeEnd()` rejects surplus arguments.
@@ -926,7 +938,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.10.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.11.0...HEAD
+[0.11.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.11.0
 [0.10.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.10.0
 [0.9.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.9.0
 [0.8.8]: https://github.com/iliaal/php_clickhouse/releases/tag/0.8.8
