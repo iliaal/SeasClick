@@ -358,7 +358,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build extension
-        uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
+        uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
         with:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}

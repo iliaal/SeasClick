@@ -46,7 +46,7 @@ jobs:
         with:
           persist-credentials: false
       - id: matrix
-        uses: php/php-windows-builder/extension-matrix@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
+        uses: php/php-windows-builder/extension-matrix@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
         with:
           php-version-list: '8.3, 8.4, 8.5'
 
@@ -65,7 +65,7 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
-      - uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
+      - uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
         with:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
@@ -83,7 +83,7 @@ jobs:
     # dispatch is build-only (the build job above still ran all lanes).
     if: github.event_name == 'release' || inputs.release_tag != ''
     steps:
-      - uses: php/php-windows-builder/release@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
+      - uses: php/php-windows-builder/release@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
         with:
           release: ${{ github.event.release.tag_name || inputs.release_tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
