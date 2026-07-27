@@ -34,9 +34,9 @@ highest_symbol_version() {
 	local -r prefix="${1}"
 	local -r binary="${2}"
 	readelf --version-info "${binary}" |
-		awk -v p="^${prefix}_[0-9]" '$0 ~ ("Name: " substr(p,2)) {
-			sub("^" p_prefix, "", $3); print $3
-		}' p_prefix="${prefix}_" |
+		awk -v prefix="${prefix}" '
+			$0 ~ ("Name: " prefix "_[0-9]") { sub("^" prefix "_", "", $3); print $3 }
+		' |
 		sort -V |
 		tail -n 1
 }

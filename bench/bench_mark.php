@@ -81,17 +81,18 @@ foreach ($testDataSet as $scenarioIndex => $scenario) {
         foreach ($clientNames as $name) {
             $clients[$name]['setup']();
             $clients[$name]['reset']();
-            $clients[$name]['run']($warmupData, 1, min(50, count($warmupData)));
+            $expected = count($warmupData);
+            $clients[$name]['run']($warmupData, 1, min(50, $expected));
             /* Untimed correctness gate: a client whose select silently
              * returned nothing would otherwise be timed and published as if
              * it had done the same work. */
             $seen = $clients[$name]['count']();
-            if ($seen !== count($warmupData)) {
+            if ($seen !== $expected) {
                 fprintf(
                     STDERR,
                     "%s inserted %d warm-up rows but reads back %d\n",
                     $name,
-                    count($warmupData),
+                    $expected,
                     $seen
                 );
                 exit(1);
@@ -291,17 +292,18 @@ function initData($count)
      * carries real entropy in a production table. */
     $rows = [];
     $timestamp = time();
-    $index = 0;
-    while ($count-- > 0) {
+    /* Knuth multiplicative hash, so the string column varies without
+     * repeating on any short cycle. */
+    $scramble = 2654435761;
+    for ($index = 0; $index < $count; ++$index) {
         $rows[] = [
             $timestamp + ($index % 86400),
-            sprintf('HASH%06X', ($index * 2654435761) & 0xFFFFFF),
+            sprintf('HASH%06X', ($index * $scramble) & 0xFFFFFF),
             2345 + ($index % 100000),
             12 + ($index % 977),
             9 + ($index % 31),
             3 + ($index % 7),
         ];
-        ++$index;
     }
     return $rows;
 }

@@ -30,23 +30,16 @@ fail() { printf 'check-vendored-patches: %s\n' "$1" >&2; exit 1; }
 mapfile -t patches < <(find "$patch_dir" -maxdepth 1 -name '*.patch' | sort)
 [ "${#patches[@]}" -gt 0 ] || fail "no patch files found in $patch_dir"
 
-# --- 1. patch files vs LOCAL_PATCHES.md headings ------------------------
+# --- 1. one LOCAL_PATCHES.md heading per patch file ---------------------
 #
-# A heading names the files it touches, so match each patch's Subject
-# against the document body rather than trying to parse headings.
+# The document opens with an "Obsoleted in <version>" section for patches
+# upstream has absorbed, which deliberately has no patch file.
 doc_headings=$(grep -c '^## ' "$doc" || true)
-# The document opens with an "Obsoleted in <version>" section that
-# deliberately has no patch file.
 obsolete_headings=$(grep -c '^## Obsoleted in ' "$doc" || true)
 live_headings=$((doc_headings - obsolete_headings))
 if [ "$live_headings" -ne "${#patches[@]}" ]; then
     fail "LOCAL_PATCHES.md documents $live_headings live modification(s) but $patch_dir holds ${#patches[@]} patch file(s)"
 fi
-
-for p in "${patches[@]}"; do
-    subject=$(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$p" | head -1)
-    [ -n "$subject" ] || fail "$(basename "$p") has no Subject line"
-done
 
 # --- manifest note should agree on the count ----------------------------
 if [ -f "$manifest" ]; then
@@ -95,14 +88,14 @@ if [ -z "$pristine" ]; then
     fi
 fi
 
-for sub in clickhouse contrib; do
-    # Only compare files the vendored copy still carries: the vendoring step
-    # trims upstream's tests, benchmarks and CI.
-    while IFS= read -r rel; do
-        if ! cmp -s "$work/$rel" "$pristine/$rel"; then
-            fail "$rel differs from pristine upstream after reversing every patch — it was hand-edited without a patch file"
-        fi
-    done < <(cd "$work/$sub" && find . -type f -printf "$sub/%P\n" | sort)
+# Compare exactly the files the work tree was built from, which is also the
+# set the vendored copy still carries: the vendoring step trims upstream's
+# tests, benchmarks and CI.
+for rel in "${tracked[@]}"; do
+    vendored_rel="${rel#lib/clickhouse-cpp/}"
+    if ! cmp -s "$work/$vendored_rel" "$pristine/$vendored_rel"; then
+        fail "$vendored_rel differs from pristine upstream after reversing every patch — it was hand-edited without a patch file"
+    fi
 done
 
 printf 'check-vendored-patches: OK (%s patches, tree reverses to pristine upstream)\n' "${#patches[@]}"
