@@ -39,3 +39,18 @@ and deliberately separate.
 Latest run lives in the top-level [README.md](../README.md) under
 "Benchmarks". To update it after a code change, run the default matrix
 on an otherwise idle host and replace the table with the emitted Markdown.
+
+## Known limitations
+
+- The HTTP client runs without compression (its default), while two of the
+  three extension columns are compressed. A `phpClickHouse (HTTP, gzip)`
+  column would make the compression axis symmetric; until it exists, read
+  the compressed columns as protocol + compression, not compression alone.
+- Native binary TCP (9000) against JSON over HTTP (8123) is a protocol
+  comparison as much as a library comparison.
+- smi2 sets `CURLOPT_FORBID_REUSE`, so every HTTP query pays a fresh TCP
+  handshake that the extension's persistent connection does not. That is
+  the client's own behaviour, but it is where much of the fixed per-query
+  gap lives.
+- Only the median of the four samples is published; run-to-run spread is
+  not shown, and differences smaller than a few percent are inside noise.

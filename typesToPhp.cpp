@@ -3373,29 +3373,35 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
 
         auto rejectLossyKey = [&]() {
             throw std::runtime_error(
-                "Map decoding would lose a duplicate or non-PHP-array key; "
-                "pass ClickHouse::MAP_AS_PAIRS for an ordered lossless result");
+                "Map decoding would collapse two entries onto the same PHP "
+                "array key; pass ClickHouse::MAP_AS_PAIRS for an ordered "
+                "lossless result");
+        };
+        /* zend_symtable_str_* semantics: a canonical decimal string becomes an
+         * integer key, matching how add_assoc_*_ex used to shape these arrays.
+         * The _add (not _add_new) variants are load-bearing — _add_new sets
+         * HASH_ADD_NEW, which skips the existence check entirely and appends a
+         * second bucket under the same key instead of returning NULL. */
+        auto symtableAdd = [](HashTable *ht, const char *key, size_t len,
+                              zval *value) -> zval * {
+            zend_ulong numeric_index;
+            if (ZEND_HANDLE_NUMERIC_STR(key, len, numeric_index)) {
+                return zend_hash_index_add(ht, numeric_index, value);
+            }
+            return zend_hash_str_add(ht, key, len, value);
         };
         auto insertValue = [&](int kkind, const std::string &sb,
                                zend_long lk, double dk, zval *value) {
             HashTable *map_ht = Z_ARRVAL_P(map_zv);
             zval *inserted = nullptr;
             if (kkind == 0) {
-                zend_ulong numeric_index;
-                if (key_code == Type::Code::String &&
-                    ZEND_HANDLE_NUMERIC_STR(sb.data(), sb.size(), numeric_index)) {
-                    zval_ptr_dtor(value);
-                    rejectLossyKey();
-                }
-                inserted = zend_hash_str_add_new(
-                    map_ht, sb.data(), sb.size(), value);
+                inserted = symtableAdd(map_ht, sb.data(), sb.size(), value);
             } else if (kkind == 1) {
-                inserted = zend_hash_index_add_new(
-                    map_ht, (zend_ulong)lk, value);
+                inserted = zend_hash_index_add(map_ht, (zend_ulong)lk, value);
             } else {
                 char kbuf[64];
                 int klen = fmtFloatKey(dk, kbuf, sizeof(kbuf));
-                inserted = zend_hash_str_add_new(map_ht, kbuf, klen, value);
+                inserted = symtableAdd(map_ht, kbuf, (size_t)klen, value);
             }
             if (!inserted) {
                 zval_ptr_dtor(value);

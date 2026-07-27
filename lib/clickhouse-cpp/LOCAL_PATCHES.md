@@ -18,9 +18,15 @@ Clang's pointer-overflow sanitizer reports it. CI previously disabled
 `pointer-overflow` for every extension and vendored translation unit, hiding the
 same defect class in binding-owned code.
 
-Patch: preserve `dictionary` unchanged when `dictSize == 0`, guard `dictBase`
-before subtracting its offset, reuse the guarded `dictEnd` value in the
-non-empty expressions, and apply the same guard when assigning `prefixEnd`.
+Patch: the `dictEnd` / `dictBase` hunks are upstream commit `e68c7d3` ("avoid
+computing 0 offsets from null pointers", first released in lz4 1.9.3) applied
+verbatim -- the vendored copy is 1.9.2 and the line numbers still match. Both
+guard on `dictionary == NULL`, so the patch becomes a clean no-op the moment
+clickhouse-cpp vendors lz4 1.9.3 or newer rather than a conflict. An earlier
+revision of this patch guarded on `dictSize == 0` instead, which diverged from
+upstream for `dictionary != NULL && dictSize == 0`. The `prefixEnd` hunk matches
+upstream 1.10.0 semantics.
+
 This permits full pointer-overflow instrumentation for the binding and the rest
 of the vendored client.
 
@@ -32,10 +38,18 @@ After a peer accepts TCP but returns a malformed native handshake,
 the next configured peer is healthy. The same gap affects initial construction
 because `CreateConnection()` delegates endpoint traversal to this method.
 
-Patch: treat `ProtocolError` like a transport failure while traversing the
-configured endpoint list. Server exceptions such as authentication failures still
-propagate without rotation. `tests/189.phpt` starts a malformed native peer before
-the healthy ClickHouse endpoint and verifies constructor-time failover.
+Patch: treat any `clickhouse::Error` like a transport failure while traversing
+the configured endpoint list. Catching `ProtocolError` alone left `OpenSSLError`
+-- its sibling, raised when a TLS peer presents an untrusted or expired
+certificate -- aborting rotation. Server exceptions such as authentication
+failures still propagate without rotation. `tests/189.phpt` starts a malformed
+native peer before the healthy ClickHouse endpoint and verifies constructor-time
+failover.
+
+Still not covered: `RetryGuard`'s mid-session rotation loop calls
+`ResetConnection()` directly and catches only `std::system_error`, so a
+malformed peer reached mid-session aborts rotation and leaves
+`current_endpoint_` pointing at the bad peer.
 
 ## clickhouse/client.cpp: `Client::Impl::BeginInsert` drops `query_id`
 
@@ -179,10 +193,36 @@ packet-loop test (`select`, `insert`, `ping`).
 or half-open peer makes `ProcessPacket` block forever — PHP `unset($ch)`
 or request shutdown hangs the worker.
 
-Patch: before destructor `EndInsert`, re-apply socket timeouts with a
-hard 5s floor when the configured recv/send timeout is zero. Healthy
-peers still finalize within the window (test 091). `Socket::SetTimeouts`
-is a best-effort `setsockopt` wrapper that never throws.
+Patch: `0010-Bound-Client-Impl-teardown-when-recv-timeout-is-infi.patch`.
+Before destructor `EndInsert`, re-apply socket timeouts with a hard 5s
+floor when the configured recv/send timeout is zero. Healthy peers still
+finalize within the window (test 091). `Socket::SetTimeouts` is a
+best-effort `setsockopt` wrapper that never throws.
 
-Also sets `state_ = Idle` in the destructor catch so a failed EndInsert
-does not leave a half-destroyed client in `Inserting`.
+Scope limits worth knowing before relying on this:
+
+- The floor only bounds the *infinite* case. A positive configured
+  `receive_timeout` is kept as-is, so `receive_timeout => 3600` still
+  stalls teardown for an hour.
+- The deadline is per `recv()`, not for the whole `EndInsert()`.
+- The `catch (...)` swallows the resulting throw. A healthy server that
+  goes quiet past the window therefore drops the insert tail with no
+  diagnostic -- the trade is a truncated abandoned insert instead of a
+  hung worker.
+- The trailing `state_ = Idle` in that catch is defensive only. Nothing
+  reads `state_` after the destructor body runs.
+
+## clickhouse/base/sslsocket.cpp: peer certificate leaked on failed verification
+
+`SSLSocket::SSLSocket` builds its error message with
+`getCertificateInfo(SSL_get_peer_certificate(ssl))`.
+`SSL_get_peer_certificate` returns a *new* reference; `getCertificateInfo`
+only borrows. Nothing freed it, so every rejected handshake leaked the
+peer certificate and its chain -- measured at ~4.4 KB per attempt under
+LeakSanitizer, linear in retries. A worker retrying against a
+misconfigured or cert-rotating peer grows without bound.
+
+Patch: `0011-Release-the-peer-certificate-on-a-failed-TLS-verific.patch`.
+Own the certificate in a `unique_ptr<X509, X509_free>` for the lifetime
+of the message build. Exercised by `tests/188.phpt` under the ASAN lane
+once that lane is built with OpenSSL.

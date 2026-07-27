@@ -7,7 +7,7 @@
 
 ![php_clickhouse: native binary protocol vs HTTP](images/php_clickhouse-hero.jpg)
 
-Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) v2.6.2 client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 30-40% faster than HTTP-based clients on heavy workloads, with modern types (Date32, Time64, Decimal128, LowCardinality, Map, JSON), multi-endpoint failover, and structured exceptions.
+Native PHP extension for [ClickHouse](https://clickhouse.com/), built on the official [ClickHouse/clickhouse-cpp](https://github.com/ClickHouse/clickhouse-cpp) v2.6.2 client. Speaks the native binary TCP protocol with LZ4 / ZSTD compression and optional TLS, picking up where [SeasX/SeasClick](https://github.com/SeasX/SeasClick) left off in 2020. 1.5-4x faster than a pure-PHP HTTP client depending on workload shape, with modern types (Date32, Time64, Decimal128, LowCardinality, Map, JSON), multi-endpoint failover, and structured exceptions.
 
 ## 📖 Documentation
 
@@ -119,6 +119,8 @@ Configuration keys, the full method list, per-type read/write rules, placeholder
 PHP 8.4.23 / ClickHouse 26.6.2.81 / localhost loopback / `Memory` table (no disk).
 
 Compared against [smi2/phpClickHouse](https://github.com/smi2/phpClickHouse), the most popular pure-PHP HTTP client. Each cell is the median of four runs and measures one bulk insert plus `selectCount` queries. Setup, reset, and warm-up are untimed; client order rotates between runs.
+
+This is native binary TCP on port 9000 against JSON over HTTP on port 8123, so it measures the protocol as much as the library. HTTP compression is left at the client's default (off) while two of the extension columns are compressed; a gzip-enabled HTTP column is tracked in [`bench/README.md`](bench/README.md).
 
 | dataCount × selectCount × limit | phpClickHouse (HTTP) | php_clickhouse (uncompressed) | php_clickhouse (LZ4) | php_clickhouse (ZSTD) |
 |---|---:|---:|---:|---:|

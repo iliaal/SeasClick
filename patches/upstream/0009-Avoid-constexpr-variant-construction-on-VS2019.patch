@@ -1,14 +1,14 @@
-From 1924ad460b5a4d299d8ddb81e01f644af9b3c04f Mon Sep 17 00:00:00 2001
+From a9e6d855ae8773dc573d07e69735867ff8e61da2 Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Wed, 15 Jul 2026 10:25:24 -0400
-Subject: [PATCH 9/9] Avoid constexpr variant construction on VS2019
+Subject: [PATCH 09/11] Avoid constexpr variant construction on VS2019
 
 ---
  clickhouse/client.cpp | 19 ++++++++++++++++---
  1 file changed, 16 insertions(+), 3 deletions(-)
 
 diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
-index 1a44638..272b87c 100644
+index 63ea66e..623f59b 100644
 --- a/clickhouse/client.cpp
 +++ b/clickhouse/client.cpp
 @@ -132,13 +132,26 @@ namespace {
@@ -41,3 +41,6 @@ index 1a44638..272b87c 100644
  {
  };
  
+-- 
+2.34.1
+

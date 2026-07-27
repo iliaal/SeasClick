@@ -105,6 +105,11 @@ jobs:
           ./scripts/check-no-seasclick.sh
           ./scripts/test-release-binary.sh
 
+      # Every hand-edit under lib/clickhouse-cpp must have a patch file and a
+      # LOCAL_PATCHES.md entry, or the next library bump drops it silently.
+      - name: Vendored patch-set integrity
+        run: ./scripts/check-vendored-patches.sh
+
       - name: Build extension (no TLS)
         run: |
           phpize
@@ -221,15 +226,18 @@ jobs:
           # run-tests.php exits 0 on all-skip, so a skipped 027 (no TLS server /
           # no TLS build) would pass this step silently. Capture the summary and
           # require both tests actually ran and passed.
-          out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/027.phpt tests/188.phpt 2>&1) || true
+          out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK \
+            tests/027.phpt \
+            tests/188.phpt \
+            tests/207_reentrant_ssl_ca_files.phpt 2>&1) || true
           echo "$out"
           skipped=$(echo "$out" | sed -n 's/.*Tests skipped *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           passed=$(echo "$out" | sed -n 's/.*Tests passed *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           if [ "$skipped" != "0" ]; then
-            echo "::error::027.phpt was skipped -- TLS server unreachable or extension built without TLS"; exit 1
+            echo "::error::a TLS test was skipped -- server unreachable or extension built without TLS"; exit 1
           fi
-          if [ "$passed" != "2" ]; then
-            echo "::error::TLS verification suite did not pass both tests (passed=$passed)"; exit 1
+          if [ "$passed" != "3" ]; then
+            echo "::error::TLS verification suite did not pass all three tests (passed=$passed)"; exit 1
           fi
 
           docker rm -f clickhouse-tls

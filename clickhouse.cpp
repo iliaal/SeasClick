@@ -567,10 +567,22 @@ static size_t retainedColumnPayloadBytes(const ColumnRef &column)
         case Type::Time:
         case Type::Time64:
         case Type::Bool:
+        /* Nullable(Nothing) — a bare NULL literal or a NULL-padded UNION arm.
+         * Carries no payload, and ColumnNothing::SaveBody throws, so it must
+         * never reach the Save() fallback. */
+        case Type::Void:
             return 0;
         default: {
+            /* Composite and future column types are charged by serialized
+             * size. Save() is best-effort: a column type the vendored library
+             * declines to serialize still has to be streamable, so fall back
+             * to the structural floor rather than failing the query. */
             CountingOutput output;
-            column->Save(&output);
+            try {
+                column->Save(&output);
+            } catch (const std::exception &) {
+                return 0;
+            }
             return output.size;
         }
     }

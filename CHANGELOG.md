@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `ClickHouse::MAP_AS_PAIRS` provides a lossless `Map` representation as ordered `[key, value]` pairs. Default associative decoding now rejects duplicate or numeric-string keys instead of silently collapsing them.
+- `ClickHouse::MAP_AS_PAIRS` provides a lossless `Map` representation as ordered `[key, value]` pairs. Default associative decoding rejects a `Map` whose entries would collapse onto the same PHP array key instead of silently dropping one.
 - Generic release archives are built on Ubuntu 22.04 for a GLIBC 2.35 ceiling, macOS binaries target macOS 12, and both lanes inspect the built binary metadata.
 
 ### Changed
 
-- Benchmark results now use `Memory` tables, exclude setup/reset/warm-up, rotate client order, and report medians from four runs.
+- Benchmark results now use `Memory` tables, exclude setup/reset/warm-up, rotate client order, and report medians from four runs. The dataset varies per row instead of repeating one row, and an untimed row-count gate rejects a run where either client read back nothing.
 - On 32-bit PHP, protocol integers that do not fit `zend_long` are returned as decimal strings instead of wrapping.
+- `Float32` reads now return the exact value the server sent. The previous `%.6g` round-trip discarded significant digits — `toFloat32(123456789)` read back as `123457000` — so values print with their full binary expansion (`toFloat32(0.55)` is `0.550000011920929`, not `0.55`).
+- Inserting a `Float32` or `Float64` value outside the column's range now throws instead of storing `±INF`.
+- `Map` reads no longer accept a key that would collide with another entry once mapped into a PHP array; keys that do not collide keep the type they had in 0.10.0 (a canonical decimal string still becomes an integer key).
 
 ### Fixed
 
@@ -25,7 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Query logs and verbose events retain the placeholder SQL template instead of recording substituted literals.
 - `writeEnd()` rejects surplus arguments.
 - Streaming result memory checks account for retained native column payload sizes instead of relying only on a per-cell estimate.
-- The legacy-name guard scans its full intended shell-script surface, and its only exception is the guard's own compatibility literals.
+- The legacy-name guard scans its full intended shell-script surface, and its only exception is the guard's own compatibility literals. It now also covers `config.w32`, `*.c`, `*.cc` and `*.yaml`.
+- `Map` decoding no longer produces a PHP array with duplicate keys. The duplicate check used `zend_hash_str_add_new()`, which skips the existence test and appends a second bucket under the same key rather than reporting the collision.
+- `selectStream()` no longer fails on a result carrying an untyped `NULL` column (`SELECT NULL`, a `NULL`-padded `UNION` arm) when `memory_limit` is set, which is every php-fpm default.
+- A failed TLS handshake no longer leaks the peer certificate and its chain (~4.4 KB per rejected connection).
+- Endpoint failover now continues past a peer whose TLS certificate fails verification, not only past a malformed native handshake.
+- The vendored destructor teardown guard is recorded in `patches/upstream/`, and CI fails if any hand-edit under `lib/clickhouse-cpp/` lacks a patch file or a `LOCAL_PATCHES.md` entry.
+- The PHPT summary gate fails on reported failures and on warned tests, instead of relying only on `run-tests.php`'s exit status.
+- Release binaries are inspected for their GLIBC ceiling before the artifact is uploaded, and the report now covers `GLIBCXX` / `CXXABI` as well.
 
 ## [0.10.0] - 2026-07-09
 

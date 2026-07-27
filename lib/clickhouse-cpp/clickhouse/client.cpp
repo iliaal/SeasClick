@@ -673,7 +673,11 @@ void Client::Impl::ResetConnectionEndpoint() {
                 current_endpoint_.reset();
                 throw;
             }
-        } catch (const ProtocolError&) {
+        } catch (const Error&) {
+            // Catch the common base, not ProtocolError alone: a TLS peer with
+            // an untrusted or expired certificate raises OpenSSLError, which is
+            // a sibling of ProtocolError, and used to abort rotation instead of
+            // moving on to the next endpoint.
             if (++i == options_.endpoints.size())
             {
                 current_endpoint_.reset();

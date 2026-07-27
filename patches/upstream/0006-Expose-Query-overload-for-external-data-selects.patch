@@ -1,7 +1,7 @@
-From acc42666b3915f6276ee4232f974785464f5674c Mon Sep 17 00:00:00 2001
+From 9f6e799bd018a0a3972cc65e50b0478de97771ea Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Wed, 15 Jul 2026 10:25:24 -0400
-Subject: [PATCH 6/9] Expose Query overload for external-data selects
+Subject: [PATCH 06/11] Expose Query overload for external-data selects
 
 ---
  clickhouse/client.cpp | 4 ++++
@@ -9,10 +9,10 @@ Subject: [PATCH 6/9] Expose Query overload for external-data selects
  2 files changed, 8 insertions(+)
 
 diff --git a/clickhouse/client.cpp b/clickhouse/client.cpp
-index 47624f8..fe4f189 100644
+index 5a843d4..ca3e762 100644
 --- a/clickhouse/client.cpp
 +++ b/clickhouse/client.cpp
-@@ -1334,6 +1334,10 @@ void Client::SelectWithExternalDataCancelable(const std::string& query, const st
+@@ -1338,6 +1338,10 @@ void Client::SelectWithExternalDataCancelable(const std::string& query, const st
      impl_->SelectWithExternalData(Query(query, query_id).OnDataCancelable(std::move(cb)), external_tables);
  }
  
@@ -38,3 +38,6 @@ index d7db10b..3879880 100644
      /// EXPERIMENTAL. Intends for execute arbitrary queries while reading the data interactively with
      /// NextBlock().
      void BeginExecute(const Query& query);
+-- 
+2.34.1
+

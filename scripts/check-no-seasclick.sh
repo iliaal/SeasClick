@@ -32,7 +32,8 @@ trap 'rm -f -- "${_tmpfile:-}"' EXIT
 cd "${ROOT}"
 
 git ls-files -z --cached --others --exclude-standard -- \
-	'*.cpp' '*.hpp' '*.h' '*.m4' '*.yml' '*.json' '*.phpt' '*.inc' '*.php' '*.sh' \
+	'*.cpp' '*.hpp' '*.h' '*.c' '*.cc' '*.m4' '*.w32' '*.yml' '*.yaml' '*.json' \
+	'*.phpt' '*.inc' '*.php' '*.sh' \
 	>"${_tmpfile}"
 mapfile -d '' CANDIDATE_FILES <"${_tmpfile}"
 SOURCE_FILES=()

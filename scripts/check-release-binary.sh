@@ -30,6 +30,17 @@ compare_versions() {
   '
 }
 
+highest_symbol_version() {
+	local -r prefix="${1}"
+	local -r binary="${2}"
+	readelf --version-info "${binary}" |
+		awk -v p="^${prefix}_[0-9]" '$0 ~ ("Name: " substr(p,2)) {
+			sub("^" p_prefix, "", $3); print $3
+		}' p_prefix="${prefix}_" |
+		sort -V |
+		tail -n 1
+}
+
 check_linux_glibc() {
 	local -r maximum="${1}"
 	local -r binary="${2}"
@@ -40,12 +51,7 @@ check_linux_glibc() {
 		printf 'readelf is required for Linux compatibility inspection\n' >&2
 		exit 69
 	}
-	required=$(
-		readelf --version-info "${binary}" |
-			awk '/Name: GLIBC_[0-9]/{sub(/^GLIBC_/, "", $3); print $3}' |
-			sort -V |
-			tail -n 1
-	)
+	required=$(highest_symbol_version GLIBC "${binary}")
 	[[ -n "${required}" ]] || {
 		printf 'No GLIBC symbol requirements found in %s\n' "${binary}" >&2
 		exit 65
@@ -60,6 +66,18 @@ check_linux_glibc() {
 		exit 1
 	fi
 	printf 'GLIBC baseline: required=%s maximum=%s\n' "${required}" "${maximum}"
+
+	# libstdc++ is the more likely ceiling for a C++17 extension, and its
+	# symbol versions are independent of glibc's. Report them so a bump in
+	# either runtime is visible; GLIBCXX_3.4.30 ships with GCC 12 (Ubuntu
+	# 22.04), which is the same baseline the GLIBC ceiling encodes.
+	local cxx_required
+	for prefix in GLIBCXX CXXABI; do
+		cxx_required=$(highest_symbol_version "${prefix}" "${binary}")
+		if [[ -n "${cxx_required}" ]]; then
+			printf '%s baseline: required=%s\n' "${prefix}" "${cxx_required}"
+		fi
+	done
 }
 
 check_macos_minimum() {

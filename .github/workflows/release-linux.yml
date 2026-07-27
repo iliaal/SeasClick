@@ -87,8 +87,47 @@ jobs:
           php-version: ${{ matrix.php }}
           coverage: none
 
-      # pie-ext-binary-builder fuses build + upload, so it only runs when there
-      # is a tag to upload to (a real release, or a dispatch that names one).
+      # Checked out ahead of the build so the pre-upload gate below can use the
+      # current checker even when the released tag predates it.
+      - name: Checkout verification tools
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/check-release-binary.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # pie-ext-binary-builder fuses build + upload into one action, so by the
+      # time its artifact can be inspected it is already attached to the
+      # release. Build an equivalent binary on the same runner first and gate
+      # on that. Costs one extra compile per release lane; the alternative is
+      # publishing a binary whose runtime ceiling was never checked.
+      - name: Pre-upload binary compatibility gate
+        if: github.event_name == 'release' || inputs.release_tag != ''
+        env:
+          COMPAT_MAXIMUM: ${{ matrix.platform.compat_maximum }}
+          COMPAT_MODE: ${{ matrix.platform.compat_mode }}
+        run: |
+          set -euo pipefail
+          gate_dir="$RUNNER_TEMP/precheck"
+          rm -rf "$gate_dir"
+          mkdir -p "$gate_dir"
+          tar -cf - --exclude=.git --exclude=.release-tools . | tar -xf - -C "$gate_dir"
+          cd "$gate_dir"
+          phpize
+          ./configure --enable-clickhouse
+          if command -v nproc >/dev/null 2>&1; then
+            jobs=$(nproc)
+          else
+            jobs=$(sysctl -n hw.ncpu)
+          fi
+          make -j"$jobs"
+          "$GITHUB_WORKSPACE/.release-tools/scripts/check-release-binary.sh" \
+            "$COMPAT_MODE" \
+            "$COMPAT_MAXIMUM" \
+            "$gate_dir/modules/clickhouse.so"
+
       - name: Build and upload prebuilt binary
         id: prebuilt
         if: github.event_name == 'release' || inputs.release_tag != ''
@@ -97,16 +136,6 @@ jobs:
           release-tag: ${{ github.event.release.tag_name || inputs.release_tag }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           configure-flags: '--enable-clickhouse'
-
-      - name: Checkout backfill verification tools
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          path: .release-tools
-          sparse-checkout: scripts/check-release-binary.sh
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
 
       # Blank-tag dispatch: compile on the real runner without uploading, so the
       # Step 9.5 pre-tag gate ("build jobs green") is meaningful for this lane too.
@@ -127,18 +156,29 @@ jobs:
             }
           '
 
+      # Second pass, this time against the artifact that was actually published.
+      # The pre-upload gate is what prevents a bad binary shipping; this proves
+      # the shipped bytes match.
       - name: Verify release binary compatibility
         env:
           COMPAT_MAXIMUM: ${{ matrix.platform.compat_maximum }}
           COMPAT_MODE: ${{ matrix.platform.compat_mode }}
           PACKAGE_PATH: ${{ steps.prebuilt.outputs.package-path }}
+          UPLOADED: ${{ (github.event_name == 'release' || inputs.release_tag != '') && '1' || '' }}
         run: |
+          set -euo pipefail
           binary="$PWD/modules/clickhouse.so"
           if [[ -n "$PACKAGE_PATH" ]]; then
             archive_dir="$RUNNER_TEMP/release-binary"
             mkdir -p "$archive_dir"
             unzip -q "$PACKAGE_PATH" clickhouse.so -d "$archive_dir"
             binary="$archive_dir/clickhouse.so"
+          elif [[ -n "$UPLOADED" ]]; then
+            # An upload ran but produced no package path: the action's output
+            # name changed. Falling back to a local build here would silently
+            # inspect something other than the published artifact.
+            echo "prebuilt step produced no package-path; refusing to verify a local build" >&2
+            exit 1
           fi
           checker="scripts/check-release-binary.sh"
           if [[ -x .release-tools/scripts/check-release-binary.sh ]]; then

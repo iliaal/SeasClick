@@ -244,10 +244,15 @@ SSLSocket::SSLSocket(const NetworkAddress& addr, const SocketTimeoutParams& time
 
     if (const auto verify_result = SSL_get_verify_result(ssl); !ssl_params.skip_verification && verify_result != X509_V_OK) {
         auto error_message = X509_verify_cert_error_string(verify_result);
+        // SSL_get_peer_certificate hands back a new reference; getCertificateInfo
+        // only borrows it. Without an owner every rejected handshake leaks the
+        // peer certificate and its whole chain.
+        std::unique_ptr<X509, decltype(&X509_free)> peer_cert(
+                SSL_get_peer_certificate(ssl), &X509_free);
         throw clickhouse::OpenSSLError("Failed to verify SSL connection, X509_v error: "
                 + std::to_string(verify_result)
                 + " " + error_message
-                + "\nServer certificate: " + getCertificateInfo(SSL_get_peer_certificate(ssl)));
+                + "\nServer certificate: " + getCertificateInfo(peer_cert.get()));
     }
 
     // Host name verification is done by OpenSSL itself, however if we are connecting to an ip-address,

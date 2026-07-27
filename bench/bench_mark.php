@@ -78,10 +78,24 @@ foreach ($testDataSet as $scenarioIndex => $scenario) {
     );
 
     try {
-        foreach ($clients as $client) {
-            $client['setup']();
-            $client['reset']();
-            $client['run']($warmupData, 1, min(50, count($warmupData)));
+        foreach ($clientNames as $name) {
+            $clients[$name]['setup']();
+            $clients[$name]['reset']();
+            $clients[$name]['run']($warmupData, 1, min(50, count($warmupData)));
+            /* Untimed correctness gate: a client whose select silently
+             * returned nothing would otherwise be timed and published as if
+             * it had done the same work. */
+            $seen = $clients[$name]['count']();
+            if ($seen !== count($warmupData)) {
+                fprintf(
+                    STDERR,
+                    "%s inserted %d warm-up rows but reads back %d\n",
+                    $name,
+                    count($warmupData),
+                    $seen
+                );
+                exit(1);
+            }
         }
 
         for ($repetition = 0; $repetition < $repetitions; ++$repetition) {
@@ -97,7 +111,12 @@ foreach ($testDataSet as $scenarioIndex => $scenario) {
         }
     } finally {
         foreach ($clients as $client) {
-            $client['teardown']();
+            /* A failed run usually leaves a dead connection, so DROP TABLE
+             * throws from inside finally and replaces the real diagnostic. */
+            try {
+                $client['teardown']();
+            } catch (Throwable $ignored) {
+            }
         }
     }
 
@@ -225,6 +244,10 @@ function makeNativeAdapter($client, $table, array $columns)
                 $client->select('SELECT * FROM ' . $qualifiedTable . ' LIMIT ' . $limit);
             }
         },
+        'count' => function () use ($client, $qualifiedTable) {
+            $rows = $client->select('SELECT count() AS c FROM ' . $qualifiedTable);
+            return (int) $rows[0]['c'];
+        },
         'teardown' => function () use ($client, $qualifiedTable) {
             $client->execute('DROP TABLE IF EXISTS ' . $qualifiedTable);
         },
@@ -251,6 +274,10 @@ function makeHttpAdapter($client, $table, array $columns)
                 $client->select('SELECT * FROM ' . $table . ' LIMIT ' . $limit)->rows();
             }
         },
+        'count' => function () use ($client, $table) {
+            $rows = $client->select('SELECT count() AS c FROM ' . $table)->rows();
+            return (int) $rows[0]['c'];
+        },
         'teardown' => function () use ($client, $table) {
             $client->write('DROP TABLE IF EXISTS ' . $table);
         },
@@ -259,10 +286,22 @@ function makeHttpAdapter($client, $table, array $columns)
 
 function initData($count)
 {
+    /* Identical rows compress to almost nothing, which flatters the LZ4 and
+     * ZSTD columns against an uncompressed HTTP client. Vary every field that
+     * carries real entropy in a production table. */
     $rows = [];
     $timestamp = time();
+    $index = 0;
     while ($count-- > 0) {
-        $rows[] = [$timestamp, 'HASH2', 2345, 12, 9, 3];
+        $rows[] = [
+            $timestamp + ($index % 86400),
+            sprintf('HASH%06X', ($index * 2654435761) & 0xFFFFFF),
+            2345 + ($index % 100000),
+            12 + ($index % 977),
+            9 + ($index % 31),
+            3 + ($index % 7),
+        ];
+        ++$index;
     }
     return $rows;
 }

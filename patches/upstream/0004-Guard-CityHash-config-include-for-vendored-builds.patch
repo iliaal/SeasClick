@@ -1,7 +1,7 @@
-From 257e2deb32cfe15d09a1b02360bd9713c1ad0cd0 Mon Sep 17 00:00:00 2001
+From 2c9f4f8a61333af1ae7a7579578af9496d3c458e Mon Sep 17 00:00:00 2001
 From: Ilia Alshanetsky <ilia@ilia.ws>
 Date: Wed, 15 Jul 2026 10:25:24 -0400
-Subject: [PATCH 4/9] Guard CityHash config include for vendored builds
+Subject: [PATCH 04/11] Guard CityHash config include for vendored builds
 
 ---
  contrib/cityhash/cityhash/city.cc | 2 ++
@@ -21,3 +21,6 @@ index e157ea0..e4ec85b 100644
  #include "city.h"
  
  #include <algorithm>
+-- 
+2.34.1
+
