@@ -82,6 +82,13 @@ if [ -z "$pristine" ]; then
     [ -n "$pinned" ] && [ -n "$repo" ] || fail "cannot read pinned/repo from $manifest"
     pristine="$work/pristine"
     if ! git clone -q --depth 1 --branch "v$pinned" "https://github.com/$repo.git" "$pristine" 2>/dev/null; then
+        # Offline is a normal state on a dev box, so degrade to the two
+        # invariants that need no network. In CI it is not: silently dropping
+        # the check that catches an unpatched hand-edit is the whole failure
+        # this script exists to prevent.
+        if [ -n "${CI:-}" ]; then
+            fail "could not clone v$pinned to compare against pristine upstream"
+        fi
         printf 'check-vendored-patches: could not clone v%s; skipping the pristine comparison\n' "$pinned" >&2
         printf 'check-vendored-patches: patch/doc mapping and reverse-apply OK (%s patches)\n' "${#patches[@]}"
         exit 0
