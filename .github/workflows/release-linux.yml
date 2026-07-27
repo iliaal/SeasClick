@@ -98,6 +98,16 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           configure-flags: '--enable-clickhouse'
 
+      - name: Checkout backfill verification tools
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/check-release-binary.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       # Blank-tag dispatch: compile on the real runner without uploading, so the
       # Step 9.5 pre-tag gate ("build jobs green") is meaningful for this lane too.
       - name: Build-only validation (blank-tag dispatch)
@@ -130,7 +140,11 @@ jobs:
             unzip -q "$PACKAGE_PATH" clickhouse.so -d "$archive_dir"
             binary="$archive_dir/clickhouse.so"
           fi
-          scripts/check-release-binary.sh \
+          checker="scripts/check-release-binary.sh"
+          if [[ -x .release-tools/scripts/check-release-binary.sh ]]; then
+            checker=".release-tools/scripts/check-release-binary.sh"
+          fi
+          "$checker" \
             "$COMPAT_MODE" \
             "$COMPAT_MAXIMUM" \
             "$binary"
