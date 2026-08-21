@@ -161,7 +161,8 @@ jobs:
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt.out" \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
-            tests/209_windows_x86_config_bounds.phpt
+            tests/209_windows_x86_config_bounds.phpt \
+            tests/216_ssl_ca_files_invalid_type.phpt
 
       - name: Rebuild with TLS and run the TLS suite
         env:
@@ -322,7 +323,8 @@ jobs:
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-zts.out" \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
-            tests/209_windows_x86_config_bounds.phpt
+            tests/209_windows_x86_config_bounds.phpt \
+            tests/216_ssl_ca_files_invalid_type.phpt
 
   # Windows extension builds need the official PHP SDK + matching MSVC
   # toolset, not the autotools phpize/configure flow. The php-org
@@ -489,7 +491,8 @@ jobs:
           scripts/assert-phpt-summary.sh "$RUNNER_TEMP/phpt-asan.out" \
             tests/027.phpt tests/064.phpt tests/070.phpt tests/188.phpt \
             tests/207_reentrant_ssl_ca_files.phpt \
-            tests/209_windows_x86_config_bounds.phpt
+            tests/209_windows_x86_config_bounds.phpt \
+            tests/216_ssl_ca_files_invalid_type.phpt
 
       - name: Run leak-enabled client lifecycle probe
         env:
