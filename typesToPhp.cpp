@@ -440,6 +440,21 @@ static std::string strict_zval_string(zval *z, const char *type_label)
         throw std::runtime_error(
             std::string("null cannot be assigned to non-Nullable column ") + type_label);
     }
+    /* Reject non-scalar types explicitly. zval_get_string would coerce an
+     * array to the literal string "Array" (after an E_WARNING) and a
+     * resource to "Resource id #N" -- silent garbage that contradicts the
+     * strict-coercion contract every other column type enforces. Objects
+     * stay accepted: a __toString()-capable value is intentional Stringable
+     * support, and a throwing __toString() surfaces through ZStrGuard. */
+    if (Z_TYPE_P(z) == IS_ARRAY) {
+        throw std::runtime_error(
+            std::string("array cannot be assigned to string column ") + type_label +
+            " (scalar or Stringable object required)");
+    }
+    if (Z_TYPE_P(z) == IS_RESOURCE) {
+        throw std::runtime_error(
+            std::string("resource cannot be assigned to string column ") + type_label);
+    }
     ZStrGuard sg(z);  // throws if a __toString() left EG(exception) pending
     return std::string(sg.val(), sg.len());
 }
@@ -1652,9 +1667,13 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 }
 #else
                 zval probe;
+                /* php_json_decode leaves its output zval UNTOUCHED on FAILURE
+                 * (core json_decode does RETURN_NULL() without a dtor on that
+                 * path); initializing first keeps the success-path dtor and any
+                 * failure-path cleanup off uninitialized stack memory. */
+                ZVAL_UNDEF(&probe);
                 if (php_json_decode(&probe, Z_STRVAL_P(v), Z_STRLEN_P(v),
                                     /*assoc=*/true, PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE) {
-                    zval_ptr_dtor(&probe);
                     if (EG(exception)) zend_clear_exception();
                     throw std::runtime_error("JSON insert: string value is not valid JSON");
                 }
@@ -2807,10 +2826,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             /* php_json_decode takes char* (not const) on PHP 7.4; &str[0]
              * is a mutable, NUL-terminated pointer on every target. */
             std::string json_str(sv);
+            /* ZVAL_UNDEF first: php_json_decode does not touch the output zval
+             * on FAILURE, so the old unconditional zval_ptr_dtor(&decoded) ran
+             * over uninitialized stack memory whenever the server sent a value
+             * re2c could not parse. */
+            ZVAL_UNDEF(&decoded);
             if (php_json_decode(&decoded, &json_str[0], json_str.size(), assoc,
                                 PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE)
             {
-                zval_ptr_dtor(&decoded);
                 throw std::runtime_error("JSON read: failed to decode server JSON value");
             }
             if (is_array)

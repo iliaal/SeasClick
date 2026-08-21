@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Inserting an invalid raw JSON string into a `JSON` column no longer runs a destructor over uninitialized stack memory on PHP below 8.3; it throws cleanly on every supported PHP version.
+- Inserting a PHP array or resource into a `String`, `FixedString`, `LowCardinality`, or IP column throws instead of silently storing `"Array"` or `"Resource id #N"`. Objects with `__toString()` remain accepted.
+- A `ssl_ca_files` config value that is neither a string nor an array is rejected at construction instead of being silently ignored.
+
+### Documentation
+
+- `selectToStream()` documents its `FixedString` trailing-NUL trim; the placeholder docs note that `{name}` / `{name:Type}` are matched anywhere in the SQL text, including inside string literals.
+
 ## [0.11.0] - 2026-07-27
 
 ### Added

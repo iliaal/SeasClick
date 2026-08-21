@@ -1120,6 +1120,7 @@ PHP_METHOD(ClickHouse, __construct)
             }
             if (php_array_get_value(_ht, "ssl_ca_files", value)) {
                 std::vector<std::string> files;
+                ZVAL_DEREF(value);
                 if (Z_TYPE_P(value) == IS_STRING) {
                     files.emplace_back(Z_STRVAL_P(value), Z_STRLEN_P(value));
                 } else if (Z_TYPE_P(value) == IS_ARRAY) {
@@ -1130,6 +1131,13 @@ PHP_METHOD(ClickHouse, __construct)
                         ZStrGuard sg(fv);
                         files.emplace_back(sg.val(), sg.len());
                     } ZEND_HASH_FOREACH_END();
+                } else {
+                    /* Every other config key rejects malformed input; a typo
+                     * like 'a.pem,b.pem' (comma-string instead of an array)
+                     * used to silently connect with NO CA files configured. */
+                    zend_throw_exception(clickhouse_exception_ce,
+                        "ssl_ca_files must be a string or an array of strings", 0);
+                    return;
                 }
                 ssl_opts.SetPathToCAFiles(files);
             }
@@ -3357,6 +3365,12 @@ static zend_long do_select_to_stream(zval *this_obj,
  * geometry columns are rejected — text formats can't unambiguously
  * serialize them. Nullable and LowCardinality wrappers around supported
  * scalars are fine.
+ *
+ * FixedString cells are emitted with trailing NUL padding trimmed (the
+ * same default as regular reads); ClickHouse::FIXEDSTRING_BINARY is not
+ * currently settable on this path, so binary payloads that legitimately
+ * end in NUL bytes lose the pad on export. Round-trip such data through
+ * select()/selectStream() with FIXEDSTRING_BINARY instead.
  */
 PHP_METHOD(ClickHouse, selectToStream)
 {
