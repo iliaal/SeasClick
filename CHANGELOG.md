@@ -7,11 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-04
+
+### Added
+
+- `password` is accepted as an alias for the `passwd` connection option.
+- Backtick-quoted identifier segments are accepted in validated table/column paths and quoted into generated `INSERT` SQL.
+- Returning `false` from a `selectStreamCallback()` callback stops the stream cleanly.
+
+### Changed
+
+- `ClickHouseStatement::__construct()` is public but throwing: direct construction raises `ClickHouseException` instead of an Engine `Error`.
+- The `setVerbose()` signature is narrowed to `bool|callable|null`, matching the runtime contract.
+- Streaming/insert recovery clears PHP insert state before reconnect attempts and only on demonstrated recovery; reset and `USE`-reapply failures are recorded in the query log.
+- Endpoint rotation and retry trigger on any client `Error`, including TLS verification failures, not only transport errors.
+- `insertFromStream()` `*WithNames` variants verify the header row against `$columns` and throw on mismatch; blank lines are skipped uniformly.
+- `ssl_*` options are validated even when TLS is off; unknown keys and material on non-TLS builds are rejected.
+- Database names are validated at construction and in `setDatabase()`; `db.table` splits on the last dot and rejects residual dots.
+- Settings and placeholder scalars reject arrays and resources instead of coercing them to strings; objects keep coercing via `__toString`.
+- The query log and verbose traces redact single-quoted SQL literals; only exception text was sanitized before.
+- Server `JSON` cells above 16 MiB are rejected before decoding.
+- `Map` reads reject key/value count mismatch in both directions.
+- Hot-path speedups measured on 200k-row probes: inserts with temporal/string/IP columns about 19% faster, IPv4 selects about 12% faster, numeric `selectToStream` 5-10% faster.
+
+
 ### Fixed
 
 - Inserting an invalid raw JSON string into a `JSON` column no longer runs a destructor over uninitialized stack memory on PHP below 8.3; it throws cleanly on every supported PHP version.
 - Inserting a PHP array or resource into a `String`, `FixedString`, `LowCardinality`, or IP column throws instead of silently storing `"Array"` or `"Resource id #N"`. Objects with `__toString()` remain accepted.
 - A `ssl_ca_files` config value that is neither a string nor an array is rejected at construction instead of being silently ignored.
+- `resetConnection()` during an outage no longer wedges the handle with a misleading "insert in progress" error.
+- The export buffer no longer leaks when the destination stream closes mid-query.
+- User `JsonSerializable`/`__toString` exceptions during `JSON` inserts surface intact instead of being replaced by generic decode errors.
+- `ssl_ca_files` array elements must be strings instead of being silently coerced.
 
 ### Documentation
 
@@ -948,7 +976,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.11.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.12.0...HEAD
+[0.12.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.12.0
 [0.11.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.11.0
 [0.10.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.10.0
 [0.9.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.9.0

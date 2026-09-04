@@ -138,6 +138,8 @@ Configuration keys, the full method list, per-type read/write rules, placeholder
 
 Shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored on `selectStatement` / `selectStream` / `selectStreamCallback`; only value flags apply there. Full signatures, per-type rules, and streaming formats live in the [documentation site](https://iliaal.github.io/php_clickhouse/).
 
+The `passwd` key also accepts the `password` alias. Returning `false` from a `selectStreamCallback()` callback stops the stream cleanly.
+
 ## 📊 Benchmarks
 
 PHP 8.4.23 / ClickHouse 26.6.2.81 / localhost loopback / `Memory` table (no disk).
