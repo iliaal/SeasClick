@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 0e4d46eb3a41f6038fffeeff01df36271d6b646c */
+ * Stub hash: 9f956fcdbf15d7a50ca40e64e99e51a69356749a */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_ClickHouse___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, connectParams, IS_ARRAY, 0)
@@ -102,7 +102,7 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_ClickHouse_setProfileCallback arginfo_class_ClickHouse_setProgressCallback
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_ClickHouse_setVerbose, 0, 1, IS_STATIC, 0)
-	ZEND_ARG_TYPE_INFO(0, sink, IS_MIXED, 0)
+	ZEND_ARG_TYPE_MASK(0, sink, MAY_BE_BOOL|MAY_BE_CALLABLE|MAY_BE_NULL, NULL)
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_ClickHouse_resetConnection arginfo_class_ClickHouse_writeEnd
@@ -379,7 +379,7 @@ static const zend_function_entry class_ClickHouseRowIterator_methods[] = {
 };
 
 static const zend_function_entry class_ClickHouseStatement_methods[] = {
-	ZEND_ME(ClickHouseStatement, __construct, arginfo_class_ClickHouseStatement___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(ClickHouseStatement, __construct, arginfo_class_ClickHouseStatement___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouseStatement, count, arginfo_class_ClickHouseStatement_count, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouseStatement, rewind, arginfo_class_ClickHouseStatement_rewind, ZEND_ACC_PUBLIC)
 	ZEND_ME(ClickHouseStatement, valid, arginfo_class_ClickHouseStatement_valid, ZEND_ACC_PUBLIC)

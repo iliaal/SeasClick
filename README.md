@@ -114,6 +114,30 @@ foreach ($ch->select("SELECT id, ts, tag FROM events ORDER BY id",
 
 Configuration keys, the full method list, per-type read/write rules, placeholders, settings, streaming, and observability all live in the **[documentation site](https://iliaal.github.io/php_clickhouse/)**.
 
+## 🧭 API surface
+
+| Area | Methods |
+|---|---|
+| Reading | `select`, `selectWithExternalData`, `selectStream`, `selectStreamCallback`, `selectStatement`, `selectToStream` |
+| Writing | `insert`, `insertAssoc`, `insertFromStream`, `writeStart`, `write`, `writeEnd` |
+| Result wrapper (`ClickHouseStatement`) | `fetchOne`, `fetchKeyPair`, `fetchColumn`, `toArray`, `statistics` (+ `Iterator` / `ArrayAccess` / `JsonSerializable`) |
+| Config & observability | `setSettings`, `setSetting`, `setDatabase`, `setProgressCallback`, `setProfileCallback`, `setVerbose`, `getStatistics`, `enableLogQueries`, `getLogQueries`, `resetConnection` |
+| DDL & introspection | `execute`, `ping`, `isExists`, `showDatabases`, `showTables`, `showCreateTable`, `getServerVersion`, `getServerUptime`, `getServerInfo`, `getCurrentEndpoint`, `databaseSize`, `tablesSize`, `tableSize`, `partitions`, `truncateTable`, `dropPartition` |
+
+| Flag | Value | Effect |
+|---|---|---|
+| `FETCH_ONE` | 1 | first cell of the first row, as a scalar |
+| `FETCH_KEY_PAIR` | 2 | column 0 → column 1 map |
+| `DATE_AS_STRINGS` | 4 | dates / datetimes as formatted strings |
+| `FETCH_COLUMN` | 8 | flat list of column 0 |
+| `JSON_AS_ARRAY` | 16 | `JSON` cells decode to assoc arrays |
+| `JSON_AS_OBJECT` | 32 | `JSON` cells decode to `stdClass` |
+| `UUID_WITH_DASHES` | 64 | hyphenated UUIDs |
+| `FIXEDSTRING_BINARY` | 128 | full N-byte `FixedString`, trailing NULs kept |
+| `MAP_AS_PAIRS` | 256 | `Map` as ordered `[key, value]` pairs |
+
+Shape flags (`FETCH_ONE` / `FETCH_KEY_PAIR` / `FETCH_COLUMN`) are ignored on `selectStatement` / `selectStream` / `selectStreamCallback`; only value flags apply there. Full signatures, per-type rules, and streaming formats live in the [documentation site](https://iliaal.github.io/php_clickhouse/).
+
 ## 📊 Benchmarks
 
 PHP 8.4.23 / ClickHouse 26.6.2.81 / localhost loopback / `Memory` table (no disk).

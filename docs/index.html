@@ -415,6 +415,12 @@ foreach ($stmt as $row) { /* ... */ }
 $stmt[0]; count($stmt); json_encode($stmt);
 $stmt-&gt;fetchOne(); $stmt-&gt;fetchKeyPair(); $stmt-&gt;fetchColumn();
 $stmt-&gt;toArray(); $stmt-&gt;statistics();</code></pre>
+<ul>
+<li><code>fetchOne()</code> returns <code>null</code> on an empty result, the scalar cell for a single-column row, and the full assoc row otherwise.</li>
+<li><code>fetchKeyPair()</code> builds a column-0 → column-1 map (<code>[]</code> when the result is empty). It throws when any row holds fewer than 2 columns or the key column is not scalar (array / object keys are rejected rather than collapsing onto one key).</li>
+<li>The wrapper is read-only: <code>offsetSet()</code> / <code>offsetUnset()</code> always throw <code>ClickHouseException</code>. Only the value-shaping fetch flags apply (see <a href="#fetch-modes">Fetch modes</a>).</li>
+<li>The legacy <code>SeasClick</code> / <code>SeasClickException</code> class names stay registered as source-compat aliases; using them raises no runtime deprecation at this time.</li>
+</ul>
 
 <h3 id="m-settings">Settings &amp; observability <a class="anchor" href="#m-settings">#</a></h3>
 <pre><code>$ch-&gt;setSettings(array $settings);            // client-wide; per-call overrides; chainable

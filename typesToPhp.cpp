@@ -42,13 +42,14 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/columns/ip6.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/lowcardinality.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/map.h"
-#include <sstream>
-#include <iomanip>
+#include "lib/clickhouse-cpp/clickhouse/base/socket.h"  // inet_ntop for the IPv4/IPv6 read fast path
 #include <algorithm>
 #include <cmath>
 #include <cerrno>
 #include <cinttypes>
+#include <cstring>  // memchr for the DateTime64 fraction split
 #include <limits>
+#include <system_error>  // inet_ntop failure, mirroring ColumnIPv4/6::AsString
 
 #include "typesToPhp.hpp"
 
@@ -224,6 +225,15 @@ struct AllowNullGuard {
  * second client's shallow insert/select and false-trip the 32 limit. */
 static thread_local int convert_depth = 0;
 static const int MAX_CONVERT_DEPTH = 32;
+/* JSON-cap (pck-729): upper bound on a single server-supplied JSON cell
+ * handed to php_json_decode on the read path. Decoding amplifies memory
+ * (PHP value graph >> wire bytes) and burns CPU in the re2c scanner, so an
+ * unbounded cell lets a malicious or degenerate value OOM or stall the
+ * worker before the parser-depth bound can matter. Oversize cells still
+ * read fine as raw strings (the default mode); only the JSON_AS_ARRAY /
+ * JSON_AS_OBJECT decode rejects them. 16 MiB covers document-shaped cells
+ * with ample headroom. */
+static const size_t MAX_JSON_CELL_BYTES = 16u * 1024u * 1024u;
 
 InsertConversionScopeGuard::InsertConversionScopeGuard()
     : saved_null(g_allow_null_in_strict), saved_depth(convert_depth) {
@@ -553,49 +563,69 @@ static int parseFixedStringWidth(TypeRef type)
 /*
  * Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" into a Unix epoch.
  *
+ * Fixed-format hand parse straight from the caller's buffer: no
+ * std::string temp, no per-cell istringstream + get_time (which built a
+ * stream, a locale-backed facet and a sentry per cell on the insert
+ * path). The exact-length requirement subsumes the old trailing-garbage
+ * peek() check, and the diagnostics below preserve the old messages.
+ * Zero-padded components are required, matching what ClickHouse itself
+ * accepts; a non-padded input the old get_time leniency took (e.g.
+ * "2024-1-2") is now rejected at the boundary.
+ *
  * Convert validated civil components directly to UTC epoch seconds.
  * timegm/_mkgmtime use -1 for both failure and the valid second before
  * the Unix epoch, and the Windows implementation rejects all pre-epoch
  * inputs.
  */
-static std::time_t to_time_t(const std::string& str, bool is_date = true)
+static std::time_t to_time_t(const char *s, size_t len, bool is_date = true)
 {
-    std::tm t = {};
-    std::istringstream ss(str);
-    ss >> std::get_time(&t, is_date ? "%Y-%m-%d" : "%Y-%m-%d %H:%M:%S");
-    if (ss.fail()) {
+    const char *kind = is_date ? "Date" : "DateTime";
+    auto fail = [&](const char *detail) -> std::time_t {
+        throw std::runtime_error(
+            std::string("Invalid ") + kind + " string" + detail +
+            ": " + std::string(s, len));
+    };
+    auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
+    auto date_shape_at = [&](const char *p) {
+        return is_digit(p[0]) && is_digit(p[1]) && is_digit(p[2]) && is_digit(p[3]) &&
+               p[4] == '-' && is_digit(p[5]) && is_digit(p[6]) && p[7] == '-' &&
+               is_digit(p[8]) && is_digit(p[9]);
+    };
+    auto time_shape_at = [&](const char *p) {
+        return p[0] == ' ' && is_digit(p[1]) && is_digit(p[2]) && p[3] == ':' &&
+               is_digit(p[4]) && is_digit(p[5]) && p[6] == ':' &&
+               is_digit(p[7]) && is_digit(p[8]);
+    };
+    size_t want = is_date ? 10 : 19;
+    /* len == want short-circuits first, so the shape probes never read
+     * past the buffer; in the len > want branch the prefix is in bounds. */
+    bool exact = (len == want) && date_shape_at(s) &&
+        (is_date || time_shape_at(s + 10));
+    if (!exact) {
+        if (len > want && date_shape_at(s) && (is_date || time_shape_at(s + 10))) {
+            return fail(" (trailing characters)");
+        }
         /* Reject malformed date/datetime strings instead of silently
          * coercing to (time_t)-1, which then read back as 1969-12-31. */
-        throw std::runtime_error(
-            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
-            " string: " + str);
+        return fail("");
     }
-    /* std::get_time stops at the first non-matching character without
-     * raising failbit, so "2024-01-01abc" parses cleanly as 2024-01-01.
-     * Require EOF after the expected format so trailing garbage is
-     * rejected at the boundary. peek() returns EOF when the stream is
-     * fully consumed; anything else is an extra character we didn't
-     * sign up for. */
-    if (ss.peek() != std::char_traits<char>::eof()) {
-        throw std::runtime_error(
-            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
-            " string (trailing characters): " + str);
+    int64_t year = (int64_t)((s[0] - '0') * 1000 + (s[1] - '0') * 100 +
+                             (s[2] - '0') * 10 + (s[3] - '0'));
+    unsigned month = (unsigned)((s[5] - '0') * 10 + (s[6] - '0'));
+    unsigned day = (unsigned)((s[8] - '0') * 10 + (s[9] - '0'));
+    unsigned hour = 0, minute = 0, second = 0;
+    if (!is_date) {
+        hour = (unsigned)((s[11] - '0') * 10 + (s[12] - '0'));
+        minute = (unsigned)((s[14] - '0') * 10 + (s[15] - '0'));
+        second = (unsigned)((s[17] - '0') * 10 + (s[18] - '0'));
     }
-    int64_t year = (int64_t)t.tm_year + 1900;
-    unsigned month = (unsigned)t.tm_mon + 1;
-    unsigned day = (unsigned)t.tm_mday;
-    unsigned hour = (unsigned)t.tm_hour;
-    unsigned minute = (unsigned)t.tm_min;
-    unsigned second = (unsigned)t.tm_sec;
     static const unsigned month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     bool leap = (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0);
     unsigned max_day = month >= 1 && month <= 12
         ? month_days[month - 1] + (month == 2 && leap ? 1U : 0U)
         : 0;
     if (day < 1 || day > max_day || hour > 23 || minute > 59 || second > 59) {
-        throw std::runtime_error(
-            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
-            " string (invalid civil time): " + str);
+        return fail(" (invalid civil time)");
     }
 
     int64_t adjusted_year = year - (month <= 2 ? 1 : 0);
@@ -615,9 +645,7 @@ static std::time_t to_time_t(const std::string& str, bool is_date = true)
             (uint64_t)seconds > (uint64_t)std::numeric_limits<std::time_t>::max();
     }
     if (out_of_range) {
-        throw std::runtime_error(
-            std::string("Invalid ") + (is_date ? "Date" : "DateTime") +
-            " string (out of range): " + str);
+        return fail(" (out of range)");
     }
     return (std::time_t)seconds;
 }
@@ -629,12 +657,14 @@ static std::time_t to_time_t(const std::string& str, bool is_date = true)
  * path used to_time_t alone, which dropped any sub-second part of the
  * string entirely.
  */
-static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &str, size_t precision)
+static std::pair<std::time_t, int64_t> to_time_t_with_frac(const char *s, size_t len, size_t precision)
 {
-    auto dot = str.find('.');
-    std::time_t whole = to_time_t(dot == std::string::npos ? str : str.substr(0, dot), false);
+    const char *dot = (const char *)memchr(s, '.', len);
+    size_t whole_len = dot ? (size_t)(dot - s) : len;
+    std::time_t whole = to_time_t(s, whole_len, false);
     int64_t frac = 0;
-    if (dot != std::string::npos) {
+    if (dot) {
+        std::string input(s, len);
         if (precision == 0) {
             /* DateTime64(0) has no fractional component; any text after
              * the dot is invalid. The prior pass silently dropped the
@@ -642,15 +672,15 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
              * as a clean DateTime64(0). */
             throw std::runtime_error(
                 "Invalid DateTime64(0) string (fractional suffix on a "
-                "zero-precision column): " + str);
+                "zero-precision column): " + input);
         }
-        const char *p = str.c_str() + dot + 1;
-        const char *end = str.c_str() + str.size();
+        const char *p = dot + 1;
+        const char *end = s + len;
         if (p >= end) {
             /* Bare "12:34:56." with no digits after the dot. Previously
              * accepted (consumed=0 took the no-op path). Reject. */
             throw std::runtime_error(
-                "Invalid DateTime64 string (bare dot without fractional digits): " + str);
+                "Invalid DateTime64 string (bare dot without fractional digits): " + input);
         }
         size_t consumed = 0;
         while (p < end && consumed < precision && *p >= '0' && *p <= '9') {
@@ -661,7 +691,7 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
         if (consumed == 0) {
             /* The first character after the dot wasn't a digit. */
             throw std::runtime_error(
-                "Invalid DateTime64 string (non-digit after dot): " + str);
+                "Invalid DateTime64 string (non-digit after dot): " + input);
         }
         // Pad missing digits up to precision so "12:34:56.5" with precision 3
         // contributes 500 (ms), not 5.
@@ -671,7 +701,7 @@ static std::pair<std::time_t, int64_t> to_time_t_with_frac(const std::string &st
          * .123 and dropped the abc. */
         if (p < end) {
             throw std::runtime_error(
-                "Invalid DateTime64 string (trailing characters after fraction): " + str);
+                "Invalid DateTime64 string (trailing characters after fraction): " + input);
         }
     }
     return {whole, frac};
@@ -697,14 +727,132 @@ struct ConvertDepthGuard {
 };
 
 
-/* precision is already bounded to 0..9 by callers; 10^9 fits in int64. */
+/* precision is already bounded to 0..9 by callers; 10^9 fits in int64.
+ * Table lookup: the loop recomputed the same scale once per cell on the
+ * DateTime64/Time64 read paths. */
 static int64_t pow10_i64(size_t precision)
 {
-    int64_t scale = 1;
-    for (size_t i = 0; i < precision; ++i) {
-        scale *= 10;
+    static constexpr int64_t kPow10[10] = {
+        1, 10, 100, 1000, 10000, 100000,
+        1000000, 10000000, 100000000, 1000000000,
+    };
+    return kPow10[precision];
+}
+
+/* Memoize per-column type parameters across cells. Every row of a column
+ * shares one Type object, so a single-entry cache keyed on the Type
+ * pointer turns the per-cell dynamic cast in the DateTime64 / Time64 /
+ * Decimal read arms into a pointer compare. A miss (a new Type object on
+ * the next block) re-resolves, so it stays correct; the range guards live
+ * on the resolve path with their original messages. */
+struct ColParamMemo {
+    const void *type_ptr = nullptr;
+    size_t precision = 0;
+    size_t scale = 0;
+};
+static thread_local ColParamMemo g_dt64_memo;
+static thread_local ColParamMemo g_t64_memo;
+static thread_local ColParamMemo g_dec_memo;
+
+static inline size_t cachedDateTime64Precision(const TypeRef &t)
+{
+    if (g_dt64_memo.type_ptr != (const void *)t.get()) {
+        size_t p = type_as_or_throw<DateTime64Type>(t, "DateTime64")->GetPrecision();
+        if (p > 9) {
+            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
+        }
+        g_dt64_memo.type_ptr = (const void *)t.get();
+        g_dt64_memo.precision = p;
     }
-    return scale;
+    return g_dt64_memo.precision;
+}
+
+static inline size_t cachedTime64Precision(const TypeRef &t)
+{
+    if (g_t64_memo.type_ptr != (const void *)t.get()) {
+        size_t p = type_as_or_throw<Time64Type>(t, "Time64")->GetPrecision();
+        if (p > 9) {
+            throw std::runtime_error("Time64 precision out of spec range (0..9)");
+        }
+        g_t64_memo.type_ptr = (const void *)t.get();
+        g_t64_memo.precision = p;
+    }
+    return g_t64_memo.precision;
+}
+
+static inline size_t cachedDecimalScale(const TypeRef &t)
+{
+    if (g_dec_memo.type_ptr != (const void *)t.get()) {
+        /* Unchecked As, as before: a null (non-Decimal metadata under a
+         * Decimal code) reads as scale 0 instead of throwing. */
+        auto dt = t->As<DecimalType>();
+        size_t s = dt ? dt->GetScale() : 0;
+        if (s > 38) {
+            throw std::runtime_error("Decimal scale out of supported range (max 38)");
+        }
+        g_dec_memo.type_ptr = (const void *)t.get();
+        g_dec_memo.scale = s;
+    }
+    return g_dec_memo.scale;
+}
+
+/* LowCardinality creation matrix: only String / FixedString payloads
+ * (each Nullable-wrapped or bare) have a vendored column class; anything
+ * else throws here rather than falling through to the generic factory. */
+static ColumnRef makeLowCardinalityColumn(TypeRef type)
+{
+    TypeRef nested = type_as_or_throw<LowCardinalityType>(type, "LowCardinality")->GetNestedType();
+    bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
+    TypeRef inner = is_nullable
+        ? type_as_or_throw<NullableType>(nested, "Nullable")->GetNestedType()
+        : nested;
+    if (inner->GetCode() == Type::Code::String) {
+        if (is_nullable) {
+            return std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>();
+        }
+        return std::make_shared<ColumnLowCardinalityT<ColumnString>>();
+    }
+    if (inner->GetCode() == Type::Code::FixedString) {
+        int width = parseFixedStringWidth(inner);
+        if (is_nullable) {
+            return std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width);
+        }
+        return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width);
+    }
+    throw std::runtime_error("LowCardinality only supported over String / FixedString (Nullable allowed)");
+}
+
+/* Map creation matrix: the five vendored key/value instantiations we
+ * build natively; anything else falls through to the generic factory
+ * (the single documented fallback, shared with createColumn's
+ * default arm below). */
+static ColumnRef makeMapColumn(TypeRef type)
+{
+    TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
+    TypeRef v = type_as_or_throw<MapType>(type, "Map")->GetValueType();
+    Type::Code kc = k->GetCode();
+    Type::Code vc = v->GetCode();
+    if (kc == Type::Code::String && vc == Type::Code::String) {
+        return std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
+            std::make_shared<ColumnString>(), std::make_shared<ColumnString>());
+    }
+    if (kc == Type::Code::String && vc == Type::Code::Int64) {
+        return std::make_shared<ColumnMapT<ColumnString, ColumnInt64>>(
+            std::make_shared<ColumnString>(), std::make_shared<ColumnInt64>());
+    }
+    if (kc == Type::Code::String && vc == Type::Code::UInt64) {
+        return std::make_shared<ColumnMapT<ColumnString, ColumnUInt64>>(
+            std::make_shared<ColumnString>(), std::make_shared<ColumnUInt64>());
+    }
+    if (kc == Type::Code::String && vc == Type::Code::Float64) {
+        return std::make_shared<ColumnMapT<ColumnString, ColumnFloat64>>(
+            std::make_shared<ColumnString>(), std::make_shared<ColumnFloat64>());
+    }
+    if (kc == Type::Code::Int64 && vc == Type::Code::String) {
+        return std::make_shared<ColumnMapT<ColumnInt64, ColumnString>>(
+            std::make_shared<ColumnInt64>(), std::make_shared<ColumnString>());
+    }
+    return CreateColumnByType(type->GetName());
 }
 
 ColumnRef createColumn(TypeRef type)
@@ -790,56 +938,10 @@ ColumnRef createColumn(TypeRef type)
         return std::make_shared<ColumnNullable>(createColumn(type_as_or_throw<NullableType>(type, "Nullable")->GetNestedType()), std::make_shared<ColumnUInt8>());
 
     case Type::Code::LowCardinality:
-    {
-        TypeRef nested = type_as_or_throw<LowCardinalityType>(type, "LowCardinality")->GetNestedType();
-        bool is_nullable = (nested->GetCode() == Type::Code::Nullable);
-        TypeRef inner = is_nullable
-            ? type_as_or_throw<NullableType>(nested, "Nullable")->GetNestedType()
-            : nested;
-        if (inner->GetCode() == Type::Code::String) {
-            if (is_nullable) {
-                return std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnString>>>();
-            }
-            return std::make_shared<ColumnLowCardinalityT<ColumnString>>();
-        }
-        if (inner->GetCode() == Type::Code::FixedString) {
-            int width = parseFixedStringWidth(inner);
-            if (is_nullable) {
-                return std::make_shared<ColumnLowCardinalityT<ColumnNullableT<ColumnFixedString>>>(width);
-            }
-            return std::make_shared<ColumnLowCardinalityT<ColumnFixedString>>(width);
-        }
-        throw std::runtime_error("LowCardinality only supported over String / FixedString (Nullable allowed)");
-    }
+        return makeLowCardinalityColumn(type);
 
     case Type::Code::Map:
-    {
-        TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
-        TypeRef v = type_as_or_throw<MapType>(type, "Map")->GetValueType();
-        Type::Code kc = k->GetCode();
-        Type::Code vc = v->GetCode();
-        if (kc == Type::Code::String && vc == Type::Code::String) {
-            return std::make_shared<ColumnMapT<ColumnString, ColumnString>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnString>());
-        }
-        if (kc == Type::Code::String && vc == Type::Code::Int64) {
-            return std::make_shared<ColumnMapT<ColumnString, ColumnInt64>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnInt64>());
-        }
-        if (kc == Type::Code::String && vc == Type::Code::UInt64) {
-            return std::make_shared<ColumnMapT<ColumnString, ColumnUInt64>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnUInt64>());
-        }
-        if (kc == Type::Code::String && vc == Type::Code::Float64) {
-            return std::make_shared<ColumnMapT<ColumnString, ColumnFloat64>>(
-                std::make_shared<ColumnString>(), std::make_shared<ColumnFloat64>());
-        }
-        if (kc == Type::Code::Int64 && vc == Type::Code::String) {
-            return std::make_shared<ColumnMapT<ColumnInt64, ColumnString>>(
-                std::make_shared<ColumnInt64>(), std::make_shared<ColumnString>());
-        }
-        return CreateColumnByType(type->GetName());
-    }
+        return makeMapColumn(type);
 
     case Type::Code::Tuple:
     {
@@ -861,6 +963,9 @@ ColumnRef createColumn(TypeRef type)
     }
 
     default:
+        /* Single documented fallback: any code without a native arm above
+         * (including exotic Map instantiations via makeMapColumn) resolves
+         * through the vendored column factory by type name. */
         return CreateColumnByType(type->GetName());
     }
 }
@@ -917,6 +1022,171 @@ static inline void appendFloatCell(TCol *value, zval *cell, const char *type_lab
         throw std::runtime_error(std::string("value out of range for ") + type_label);
     }
     value->Append((typename TCol::ValueType)n);
+}
+/* Per-cell String append, shared by the transpose leaf and the fused
+ * builder. The IS_STRING fast path appends a view of the zval buffer
+ * straight into the column store (one copy); every other scalar still
+ * goes through the strict temp string, which the coercion needs. NULL /
+ * array / resource / Stringable handling is identical to strict_zval_string. */
+static inline void appendStringCell(ColumnString *value, zval *cell, const char *type_label)
+{
+    ZVAL_DEREF(cell);
+    if (Z_TYPE_P(cell) == IS_STRING) {
+        value->Append(std::string_view(Z_STRVAL_P(cell), Z_STRLEN_P(cell)));
+        return;
+    }
+    value->Append(strict_zval_string(cell, type_label));
+}
+
+/* Same shape for FixedString, with the declared-width check on both paths. */
+static inline void appendFixedStringCell(ColumnFixedString *value, zval *cell,
+                                         size_t width, const char *type_label)
+{
+    ZVAL_DEREF(cell);
+    if (Z_TYPE_P(cell) == IS_STRING) {
+        size_t slen = Z_STRLEN_P(cell);
+        if (slen > width) {
+            throw std::runtime_error(
+                "FixedString value exceeds the declared column width");
+        }
+        value->Append(std::string_view(Z_STRVAL_P(cell), slen));
+        return;
+    }
+    std::string s = strict_zval_string(cell, type_label);
+    if (s.size() > width) {
+        throw std::runtime_error(
+            "FixedString value exceeds the declared column width");
+    }
+    value->Append(s);
+}
+
+/* Per-cell date/datetime append, shared by appendDateColumn and the fused
+ * builder. String cells parse via to_time_t (no user code runs); every
+ * other input goes through strict_zval_i64, which throws on objects
+ * without invoking __toString -- so this is reentrancy-free. */
+template <typename TCol>
+static inline void appendDateCell(TCol *value, zval *cell, bool is_date,
+                                  const char *type_label,
+                                  int64_t min_epoch, int64_t max_epoch)
+{
+    ZVAL_DEREF(cell);
+    std::time_t t;
+    if (Z_TYPE_P(cell) == IS_STRING) {
+        t = (std::time_t)to_time_t(Z_STRVAL_P(cell), Z_STRLEN_P(cell), is_date);
+    } else {
+        t = (std::time_t)strict_zval_i64(cell, type_label);
+    }
+    if ((int64_t)t < min_epoch || (int64_t)t > max_epoch) {
+        throw std::runtime_error(
+            std::string(type_label) + " value is outside the representable "
+            "range for this column type");
+    }
+    value->Append(t);
+}
+
+/* Per-cell Time append: int32 seconds, numeric inputs only. Strings are
+ * rejected without coercion, and strict_zval_i64 throws on objects
+ * without invoking __toString -- reentrancy-free like appendDateCell. */
+static inline void appendTimeCell(ColumnTime *value, zval *cell)
+{
+    ZVAL_DEREF(cell);
+    /* Time is stored as int seconds-since-midnight; accept only
+     * numeric inputs. String inputs would need an "HH:MM:SS"
+     * parser which the column type doesn't currently expose, so
+     * reject strings explicitly instead of letting zval_get_long
+     * coerce "abc" to 0. */
+    if (Z_TYPE_P(cell) == IS_STRING) {
+        throw std::runtime_error(
+            "Time column inserts require numeric seconds; "
+            "string formatted-time input is not currently supported");
+    }
+    int64_t t = strict_zval_i64(cell, "Time");
+    if (t < INT32_MIN || t > INT32_MAX) {
+        throw std::runtime_error(
+            "Time column value out of representable int32 range");
+    }
+    value->Append((int32_t)t);
+}
+
+/* Per-cell DateTime64 append. String cells parse via to_time_t_with_frac
+ * and numerics via the strict parsers; no branch invokes user PHP, so
+ * this is reentrancy-free. precision/scale are resolved once per column
+ * by the caller. */
+static inline void appendDateTime64Cell(ColumnDateTime64 *value, zval *cell,
+                                        size_t precision, int64_t scale)
+{
+    ZVAL_DEREF(cell);
+    /* Any string is treated as a formatted timestamp; the prior
+     * dash-only gate let "abc" fall through zval_get_long to 0
+     * (epoch). to_time_t_with_frac validates fully. Numeric
+     * inputs go through strict_zval_long / strict_zval_double. */
+    if (Z_TYPE_P(cell) == IS_STRING) {
+        auto [whole, frac] = to_time_t_with_frac(
+            Z_STRVAL_P(cell), Z_STRLEN_P(cell), precision);
+        /* DR-004: guard whole*scale (+frac) against int64 overflow,
+         * matching the integer path below. A far-future timestamp
+         * (e.g. 2262-04-12 at precision 9) otherwise wraps silently to
+         * a 1900-era value. frac is in [0, scale), so a one-tick
+         * headroom on the multiply bound covers the add. */
+        int64_t w = (int64_t)whole;
+        if (w > (INT64_MAX - frac) / scale || w < INT64_MIN / scale) {
+            throw std::runtime_error(
+                "DateTime64 value out of representable range for this precision");
+        }
+        value->Append(w * scale + frac);
+    } else if (Z_TYPE_P(cell) == IS_DOUBLE) {
+        /* The numeric paths take the value as (fractional) seconds
+         * since the epoch, like DateTime. A double's 52-bit mantissa
+         * can't hold epoch * 10^precision exactly once precision >= 7,
+         * so a float would silently round; require a formatted string
+         * for sub-microsecond precision. */
+        if (precision >= 7) {
+            throw std::runtime_error(
+                "DateTime64 precision >= 7 cannot be set from a float without "
+                "precision loss; pass a formatted date string for sub-microsecond precision");
+        }
+        double d = strict_zval_double(cell, "DateTime64");
+        value->Append(checked_double_to_int64(d * scale, "DateTime64"));
+    } else {
+        /* Integer = whole seconds since the epoch, scaled to ticks.
+         * Guard the multiply against int64 overflow for absurd inputs. */
+        int64_t secs = strict_zval_i64(cell, "DateTime64");
+        if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
+            throw std::runtime_error(
+                "DateTime64 seconds value out of representable range for this precision");
+        }
+        value->Append(secs * scale);
+    }
+}
+
+/* Per-cell Time64 append. Same reentrancy-free shape as DateTime64. */
+static inline void appendTime64Cell(ColumnTime64 *value, zval *cell,
+                                    size_t precision, int64_t scale)
+{
+    ZVAL_DEREF(cell);
+    if (Z_TYPE_P(cell) == IS_STRING) {
+        throw std::runtime_error(
+            "Time64 column inserts require numeric seconds; "
+            "string formatted-time input is not currently supported");
+    }
+    if (Z_TYPE_P(cell) == IS_DOUBLE) {
+        if (precision >= 7) {
+            throw std::runtime_error(
+                "Time64 precision >= 7 cannot be set from a float without "
+                "precision loss; pass an integer number of seconds");
+        }
+        double d = strict_zval_double(cell, "Time64");
+        value->Append(checked_double_to_int64(d * scale, "Time64"));
+    } else {
+        /* Integer = whole seconds, scaled to ticks; guard the
+         * multiply against int64 overflow. */
+        int64_t secs = strict_zval_i64(cell, "Time64");
+        if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
+            throw std::runtime_error(
+                "Time64 seconds value out of representable range for this precision");
+        }
+        value->Append(secs * scale);
+    }
 }
 
 template <typename TCol>
@@ -995,6 +1265,45 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
     return value;
 }
 
+// 64-bit twin of appendUIntHexCell. The hex branch is identical (strtoull
+// covers the full 64-bit range); the non-hex branch parses via
+// strict_zval_u64 instead of strict_zval_i64 so decimal strings above
+// ZEND_LONG_MAX land — readers already surface such values as decimal
+// strings, so the writer must accept the same form.
+static inline void appendUInt64HexCell(ColumnUInt64 *value, zval *array_value,
+                                      const char *type_label)
+{
+    ZVAL_DEREF(array_value);
+    if (Z_TYPE_P(array_value) == IS_STRING && Z_STRLEN_P(array_value) >= 3 &&
+        *Z_STRVAL_P(array_value) == '0' &&
+        (*(Z_STRVAL_P(array_value) + 1) == 'x' || *(Z_STRVAL_P(array_value) + 1) == 'X')) {
+        const char *s = Z_STRVAL_P(array_value);
+        size_t slen = Z_STRLEN_P(array_value);
+        char *endp = NULL;
+        errno = 0;
+        unsigned long long n = strtoull(s, &endp, 0);
+        if (errno == ERANGE || endp == s ||
+            (size_t)(endp - s) != slen) {
+            throw std::runtime_error(
+                std::string("invalid hex literal for ") + type_label);
+        }
+        value->Append((ColumnUInt64::ValueType)n);
+    } else {
+        value->Append(strict_zval_u64(array_value, type_label));
+    }
+}
+
+static ColumnRef appendUInt64Column(HashTable *values_ht,
+                                   const char *type_label)
+{
+    auto value = std::make_shared<ColumnUInt64>();
+    zval *array_value;
+    ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+        appendUInt64HexCell(value.get(), array_value, type_label);
+    } ZEND_HASH_FOREACH_END();
+    return value;
+}
+
 // Build an Enum8 / Enum16 column from a PHP rows array. Integer cells
 // validate against the type's declared value set; the prior unchecked
 // Append silently stored values like 0 / 3 / 127 inside an
@@ -1065,33 +1374,11 @@ static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date,
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        ZVAL_DEREF(array_value);
-        /* Any string is treated as a formatted date/datetime. The prior
-         * dash-only gate routed dashless strings through zval_get_long,
-         * which silently coerced "abc" to 0 and landed it as the epoch.
-         * to_time_t now does full validation (EOF after format, gmtime
-         * round-trip). Numeric inputs go through strict_zval_long so
-         * non-numeric, fractional, NaN/Inf are rejected. */
-        std::time_t t;
-        if (Z_TYPE_P(array_value) == IS_STRING) {
-            t = (std::time_t)to_time_t(
-                std::string(Z_STRVAL_P(array_value), Z_STRLEN_P(array_value)),
-                is_date);
-        } else {
-            t = (std::time_t)strict_zval_i64(array_value, type_label);
-        }
-        /* DR-003: clickhouse-cpp narrows the epoch into the column's storage
-         * (uint16 days for Date, int32 days for Date32, uint32 seconds for
-         * DateTime) with a bare static_cast and no range check, so an
-         * out-of-range value wraps silently (Date "3000-01-01" -> 2102,
-         * DateTime "1960-..." -> 2096). Reject anything outside the column
-         * type's representable civil range. */
-        if ((int64_t)t < min_epoch || (int64_t)t > max_epoch) {
-            throw std::runtime_error(
-                std::string(type_label) + " value is outside the representable "
-                "range for this column type");
-        }
-        value->Append(t);
+        /* Any string is treated as a formatted date/datetime; numerics go
+         * through strict_zval_i64. See appendDateCell for the coercion
+         * rules and the DR-003 range check. */
+        appendDateCell(value.get(), array_value, is_date, type_label,
+                       min_epoch, max_epoch);
     } ZEND_HASH_FOREACH_END();
     return value;
 }
@@ -1472,14 +1759,16 @@ zval *extractRowCell(zval *row_pz, size_t col_index,
  * PERF-004: build a column straight from the row-major input, pulling
  * col_index out of each row without first transposing the column into a
  * temporary PHP array (which the transpose path then walks a second time
- * and destroys). Restricted to the reentrancy-free numeric types: their
- * strict coercers (strict_zval_long / _double / _u64, and the UInt32 hex
- * parser) never invoke user PHP, so iterating the live rows HashTable is
- * safe -- no __toString can mutate $rows mid-walk, and no snapshot / addref
- * is needed. String, UUID, Decimal, Date-from-string, Enum, and all
- * composite types can re-enter user code, so they stay on the snapshotting
- * transpose path. Returns nullptr for any type not fused here; the caller
- * falls back to buildSingleColumnZval + insertColumn.
+ * and destroys). Fused iff the per-cell appender cannot invoke user PHP:
+ * the strict numeric coercers, the hand date parsers (to_time_t /
+ * to_time_t_with_frac) and the reject-strings Time arms throw on objects
+ * without touching __toString, so iterating the live rows HashTable is
+ * safe -- no user callback can mutate $rows mid-walk, and no snapshot /
+ * addref is needed. String, FixedString, UUID, Decimal, Enum, JSON and
+ * all composite types go through ZStrGuard / jsonSerialize, so they stay
+ * on the snapshotting transpose path. Returns nullptr for any type not
+ * fused here; the caller falls back to buildSingleColumnZval +
+ * insertColumn.
  */
 ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
                                        const std::vector<zend_string*> *col_names,
@@ -1506,6 +1795,28 @@ ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
     case Type::Code::UInt64: return build(std::make_shared<ColumnUInt64>(), [](ColumnUInt64 *c, zval *v){ c->Append(strict_zval_u64(v, "UInt64")); });
     case Type::Code::Float32:return build(std::make_shared<ColumnFloat32>(),[](ColumnFloat32 *c, zval *v){ appendFloatCell(c, v, "Float32"); });
     case Type::Code::Float64:return build(std::make_shared<ColumnFloat64>(),[](ColumnFloat64 *c, zval *v){ appendFloatCell(c, v, "Float64"); });
+    case Type::Code::Date:    return build(std::make_shared<ColumnDate>(),   [](ColumnDate *c, zval *v)    { appendDateCell(c, v, true, "Date", 0, 65535LL * 86400 + 86399); });
+    case Type::Code::Date32:  return build(std::make_shared<ColumnDate32>(), [](ColumnDate32 *c, zval *v)  { appendDateCell(c, v, true, "Date32", -25567LL * 86400, 120529LL * 86400 + 86399); });
+    case Type::Code::DateTime:return build(std::make_shared<ColumnDateTime>(),[](ColumnDateTime *c, zval *v){ appendDateCell(c, v, false, "DateTime", 0, 4294967295LL); });
+    case Type::Code::Time:    return build(std::make_shared<ColumnTime>(),   [](ColumnTime *c, zval *v)    { appendTimeCell(c, v); });
+    case Type::Code::DateTime64: {
+        size_t precision = type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision();
+        if (precision > 9) {
+            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
+        }
+        int64_t scale = pow10_i64(precision);
+        auto column = std::make_shared<ColumnDateTime64>(precision);
+        return build(column, [precision, scale](ColumnDateTime64 *c, zval *v){ appendDateTime64Cell(c, v, precision, scale); });
+    }
+    case Type::Code::Time64: {
+        size_t precision = type_as_or_throw<Time64Type>(type, "Time64")->GetPrecision();
+        if (precision > 9) {
+            throw std::runtime_error("Time64 precision out of spec range (0..9)");
+        }
+        int64_t scale = pow10_i64(precision);
+        auto column = std::make_shared<ColumnTime64>(precision);
+        return build(column, [precision, scale](ColumnTime64 *c, zval *v){ appendTime64Cell(c, v, precision, scale); });
+    }
     default:
         return nullptr;
     }
@@ -1553,28 +1864,15 @@ static void validateDecimalText(const std::string &s, size_t precision,
     }
 }
 
-ColumnRef insertColumn(TypeRef type, zval *value_zval)
+/* Numeric insert family: every int/uint width plus both float widths.
+ * UInt64 routes through appendUInt64Column (hex + strict-u64 parse, so
+ * decimal strings above ZEND_LONG_MAX land); the rest share the
+ * int/hex/float appenders with the fused-row leaf builders below. */
+static ColumnRef insertNumericColumn(Type::Code code, HashTable *values_ht)
 {
-    ConvertDepthGuard depth_guard;  // shared with createColumn / convertToZval
-    zval *array_value;
-    HashTable *values_ht = Z_ARRVAL_P(value_zval);
-
-    switch (type->GetCode())
-    {
-    case Type::Code::UInt64: {
-        /* Direct call into strict_zval_u64 instead of going through
-         * appendUIntColumnWithHex<ColumnUInt64>. The templated path
-         * casts through zend_long for the non-hex branch and rejects
-         * decimal strings above ZEND_LONG_MAX. UInt64 values up to
-         * UINT64_MAX must be insertable from PHP — readers already
-         * surface them as decimal strings — so the writer needs to
-         * accept the same form. */
-        auto value = std::make_shared<ColumnUInt64>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-            value->Append(strict_zval_u64(array_value, "UInt64"));
-        } ZEND_HASH_FOREACH_END();
-        return value;
-    }
+    switch (code) {
+    case Type::Code::UInt64:
+        return appendUInt64Column(values_ht, "UInt64");
     case Type::Code::UInt8:
         return appendIntColumn<ColumnUInt8>(values_ht, 0, 0xFF, "UInt8");
     case Type::Code::UInt16:
@@ -1589,6 +1887,396 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         return appendIntColumn<ColumnInt32>(values_ht, INT32_MIN, INT32_MAX, "Int32");
     case Type::Code::Int64:
         return appendIntColumn<ColumnInt64>(values_ht, INT64_MIN, INT64_MAX, "Int64");
+    case Type::Code::Float32:
+        return appendFloatColumn<ColumnFloat32>(values_ht, "Float32");
+    case Type::Code::Float64:
+        return appendFloatColumn<ColumnFloat64>(values_ht, "Float64");
+    default:
+        throw std::logic_error("insertNumericColumn: non-numeric type code");
+    }
+}
+
+/* Temporal insert family: date / time / datetime widths. The
+ * precision-carrying cases (DateTime64, Time64) read the scale from
+ * `type`, mirroring the fused-row leaf builders. */
+static ColumnRef insertTemporalColumn(TypeRef type, HashTable *values_ht)
+{
+    zval *array_value;
+    switch (type->GetCode()) {
+    case Type::Code::DateTime:
+        /* DateTime: uint32 seconds, 1970-01-01 .. 2106-02-07 06:28:15. */
+        return appendDateColumn<ColumnDateTime>(values_ht, /*is_date=*/false,
+                                                "DateTime", 0, 4294967295LL);
+    case Type::Code::DateTime64:
+    {
+        size_t precision = type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision();
+        /* Bound the server-supplied precision before the scale loop: a
+         * precision >= 19 overflows the signed int64 scale (UB), and the
+         * read path already rejects precision > 9. */
+        if (precision > 9) {
+            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
+        }
+        auto value = std::make_shared<ColumnDateTime64>(precision);
+        int64_t scale = pow10_i64(precision);
+
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            appendDateTime64Cell(value.get(), array_value, precision, scale);
+        }
+        ZEND_HASH_FOREACH_END();
+
+        return value;
+    }
+    case Type::Code::Date:
+        /* Date: uint16 days, 1970-01-01 .. 2149-06-06 (day 0..65535). */
+        return appendDateColumn<ColumnDate>(values_ht, /*is_date=*/true,
+                                            "Date", 0, 65535LL * 86400 + 86399);
+    case Type::Code::Date32:
+        /* Date32: int32 days, 1900-01-01 .. 2299-12-31 (day -25567..120529). */
+        return appendDateColumn<ColumnDate32>(values_ht, /*is_date=*/true,
+                                              "Date32",
+                                              -25567LL * 86400,
+                                              120529LL * 86400 + 86399);
+    case Type::Code::Time:
+    {
+        auto value = std::make_shared<ColumnTime>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            appendTimeCell(value.get(), array_value);
+        }
+        ZEND_HASH_FOREACH_END();
+        return value;
+    }
+    case Type::Code::Time64:
+    {
+        size_t precision = type_as_or_throw<Time64Type>(type, "Time64")->GetPrecision();
+        if (precision > 9) {
+            throw std::runtime_error("Time64 precision out of spec range (0..9)");
+        }
+        auto value = std::make_shared<ColumnTime64>(precision);
+        int64_t scale = pow10_i64(precision);
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            appendTime64Cell(value.get(), array_value, precision, scale);
+        }
+        ZEND_HASH_FOREACH_END();
+        return value;
+    }
+    default:
+        throw std::logic_error("insertTemporalColumn: non-temporal type code");
+    }
+}
+
+/* Geo + IP insert family: textual/numeric IPs and the geo shapes. */
+static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
+{
+    zval *array_value;
+    switch (code) {
+    case Type::Code::IPv4:
+    {
+        /* ColumnIPv4::Append(string) validates via inet_pton and throws on
+         * an empty string, so the empty-string null placeholder String uses
+         * doesn't work. Under AllowNullGuard (a Nullable(IPv4) build), emit
+         * a valid sentinel the null bitmap masks out. */
+        auto value = std::make_shared<ColumnIPv4>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
+                value->Append(std::string("0.0.0.0"));
+            } else if (Z_TYPE_P(v) == IS_LONG || Z_TYPE_P(v) == IS_DOUBLE) {
+                /* Integer input matches ClickHouse's toIPv4(N): the value is
+                 * the IP with the most-significant byte as the first octet
+                 * (16909060 -> 1.2.3.4). Format to dotted-quad and reuse the
+                 * validated string path rather than ColumnIPv4::Append(uint32),
+                 * whose host/network byte-order handling differs. An integral
+                 * float is accepted too (consistent with the integer columns,
+                 * which take int + integral-double); a fractional float is
+                 * rejected. A string is always treated as a textual IP. */
+                zend_long n;
+                if (Z_TYPE_P(v) == IS_DOUBLE) {
+                    double d = Z_DVAL_P(v), intpart;
+                    if (std::isnan(d) || std::isinf(d) || std::modf(d, &intpart) != 0.0) {
+                        throw std::runtime_error("IPv4 float input must be an integral value");
+                    }
+                    if (d < 0.0 || d > (double)UINT32_MAX) {
+                        throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
+                    }
+                    n = (zend_long)d;
+                } else {
+                    n = Z_LVAL_P(v);
+                }
+                if (n < 0 || (uint64_t)n > UINT32_MAX) {
+                    throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
+                }
+                uint32_t u = (uint32_t)n;
+                char ipbuf[16];
+                snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
+                         (unsigned)((u >> 24) & 0xFF), (unsigned)((u >> 16) & 0xFF),
+                         (unsigned)((u >> 8) & 0xFF),  (unsigned)(u & 0xFF));
+                value->Append(std::string(ipbuf));
+            } else {
+                value->Append(strict_zval_string(v, "IPv4"));
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        return value;
+    }
+    case Type::Code::IPv6:
+    {
+        auto value = std::make_shared<ColumnIPv6>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
+        {
+            zval *v = array_value;
+            ZVAL_DEREF(v);
+            if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
+                value->Append(std::string_view("::"));
+            } else {
+                /* Append(string_view) calls inet_pton on .data(); a view of
+                 * a std::string is NUL-terminated, a bare view need not be. */
+                std::string s = strict_zval_string(v, "IPv6");
+                value->Append(std::string_view(s));
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        return value;
+    }
+    case Type::Code::Point:
+    {
+        auto col = std::make_shared<ColumnPoint>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            col->Append(phpToPoint(array_value));
+        } ZEND_HASH_FOREACH_END();
+        return col;
+    }
+    case Type::Code::Ring:
+    {
+        auto col = std::make_shared<ColumnRing>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            col->Append(phpToRing(array_value));
+        } ZEND_HASH_FOREACH_END();
+        return col;
+    }
+    case Type::Code::Polygon:
+    {
+        auto col = std::make_shared<ColumnPolygon>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            col->Append(phpToPolygon(array_value));
+        } ZEND_HASH_FOREACH_END();
+        return col;
+    }
+    case Type::Code::MultiPolygon:
+    {
+        auto col = std::make_shared<ColumnMultiPolygon>();
+        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
+            ZVAL_DEREF(array_value);
+            if (Z_TYPE_P(array_value) != IS_ARRAY) {
+                throw std::runtime_error("MultiPolygon must be a PHP array of polygons");
+            }
+            std::vector<std::vector<std::vector<std::tuple<double, double>>>> mp;
+            zval *poly;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array_value), poly) {
+                mp.push_back(phpToPolygon(poly));
+            } ZEND_HASH_FOREACH_END();
+            col->Append(mp);
+        } ZEND_HASH_FOREACH_END();
+        return col;
+    }
+    default:
+        throw std::logic_error("insertGeoIpColumn: non-geo/IP type code");
+    }
+}
+
+/* Map insert family: key-shape classification (assoc vs pairs) then
+ * per-key-type dispatch into the appendMapByValueType builders. */
+static ColumnRef insertMapColumn(TypeRef type, HashTable *values_ht)
+{
+        TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
+        TypeRef v = type_as_or_throw<MapType>(type, "Map")->GetValueType();
+        Type::Code kc = k->GetCode();
+
+        MapInputShape input_shape = classifyMapInput(values_ht);
+        if (input_shape == MapInputShape::Mixed) {
+            throw std::runtime_error(
+                "Map rows must consistently use associative arrays or ordered key/value pairs");
+        }
+        if (input_shape == MapInputShape::Pairs) {
+            return appendMapPairsColumn(values_ht, k, v);
+        }
+
+        // String keys reject integer-keyed PHP entries outright; integer
+        // keys parse the string form or fall back to the numeric key.
+        // Numeric parsers reject anything that doesn't consume the full
+        // string (PHP's strtoll silently returned 0 for "abc" before).
+        auto strKey = [](zend_string *zk, zend_ulong) -> std::string {
+            if (!zk) {
+                throw std::runtime_error("Map(String, *) row entry must have a string key");
+            }
+            return std::string(ZSTR_VAL(zk), ZSTR_LEN(zk));
+        };
+        /* PHP zend_string is length-prefixed and may contain embedded
+         * NUL bytes. Comparing endp against ZSTR_LEN is the right
+         * "fully consumed" check; checking *endp == '\0' would let
+         * "123\x00garbage" silently parse as 123 because endp would
+         * land on the NUL. */
+        auto i64Key = [](zend_string *zk, zend_ulong nk) -> int64_t {
+            if (!zk) return (int64_t)(zend_long)nk;
+            const char *s = ZSTR_VAL(zk);
+            char *endp = NULL;
+            errno = 0;
+            long long v = strtoll(s, &endp, 10);
+            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
+                throw std::runtime_error(
+                    std::string("Map integer key is not a valid number: ") +
+                    std::string(s, ZSTR_LEN(zk)));
+            }
+            return (int64_t)v;
+        };
+        auto u64Key = [](zend_string *zk, zend_ulong nk) -> uint64_t {
+            if (!zk) {
+                zend_long signed_key = (zend_long)nk;
+                if (signed_key < 0) {
+                    throw std::runtime_error("Map unsigned key cannot be negative");
+                }
+                return (uint64_t)signed_key;
+            }
+            const char *s = ZSTR_VAL(zk);
+            char *endp = NULL;
+            errno = 0;
+            unsigned long long v = strtoull(s, &endp, 10);
+            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
+                throw std::runtime_error(
+                    std::string("Map unsigned key is not a valid number: ") +
+                    std::string(s, ZSTR_LEN(zk)));
+            }
+            return (uint64_t)v;
+        };
+        auto f64Key = [](zend_string *zk, zend_ulong nk) -> double {
+            if (!zk) return (double)(zend_long)nk;
+            const char *s = ZSTR_VAL(zk);
+            char *endp = NULL;
+            errno = 0;
+            double v = strtod(s, &endp);
+            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
+                throw std::runtime_error(
+                    std::string("Map float key is not a valid number: ") +
+                    std::string(s, ZSTR_LEN(zk)));
+            }
+            return v;
+        };
+        auto f32Key = [&](zend_string *zk, zend_ulong nk) -> double {
+            double v = f64Key(zk, nk);
+            double max = (double)std::numeric_limits<float>::max();
+            if (v < -max || v > max) {
+                throw std::runtime_error("Map key out of range for Float32");
+            }
+            return v;
+        };
+        auto uuidKey = [](zend_string *zk, zend_ulong) -> UUID {
+            if (!zk) {
+                throw std::runtime_error("Map(UUID, *) row entry must have a string key");
+            }
+            return parseUUIDString(ZSTR_VAL(zk), ZSTR_LEN(zk), "UUID key format error");
+        };
+
+        /* Narrow-key wrappers: same range-check the value side gained for
+         * narrow Map columns. Keys arrive as decimal strings; the parsed
+         * int64 must still fit the destination column width. */
+        auto narrowKeyI = [&](zend_string *zk, zend_ulong nk,
+                              int64_t lo, int64_t hi, const char *t) -> int64_t {
+            int64_t parsed = i64Key(zk, nk);
+            if (parsed < lo || parsed > hi) {
+                throw std::runtime_error(std::string("Map key out of range for ") + t);
+            }
+            return parsed;
+        };
+        auto narrowKeyU = [&](zend_string *zk, zend_ulong nk,
+                              uint64_t hi, const char *t) -> uint64_t {
+            uint64_t parsed = u64Key(zk, nk);
+            if (parsed > hi) {
+                throw std::runtime_error(std::string("Map key out of range for ") + t);
+            }
+            return parsed;
+        };
+
+        switch (kc) {
+            case Type::Code::String:
+                return appendMapByValueType<ColumnString,  std::string>(values_ht, v, strKey);
+            case Type::Code::Int8: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyI(zk, nk, INT8_MIN, INT8_MAX, "Int8");
+                };
+                return appendMapByValueType<ColumnInt8,    int64_t>(values_ht, v, kf);
+            }
+            case Type::Code::Int16: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyI(zk, nk, INT16_MIN, INT16_MAX, "Int16");
+                };
+                return appendMapByValueType<ColumnInt16,   int64_t>(values_ht, v, kf);
+            }
+            case Type::Code::Int32: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyI(zk, nk, INT32_MIN, INT32_MAX, "Int32");
+                };
+                return appendMapByValueType<ColumnInt32,   int64_t>(values_ht, v, kf);
+            }
+            case Type::Code::Int64:
+                return appendMapByValueType<ColumnInt64,   int64_t>(values_ht, v, i64Key);
+            case Type::Code::UInt8: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyU(zk, nk, UINT8_MAX, "UInt8");
+                };
+                return appendMapByValueType<ColumnUInt8,   uint64_t>(values_ht, v, kf);
+            }
+            case Type::Code::UInt16: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyU(zk, nk, UINT16_MAX, "UInt16");
+                };
+                return appendMapByValueType<ColumnUInt16,  uint64_t>(values_ht, v, kf);
+            }
+            case Type::Code::UInt32: {
+                auto kf = [&](zend_string *zk, zend_ulong nk) {
+                    return narrowKeyU(zk, nk, UINT32_MAX, "UInt32");
+                };
+                return appendMapByValueType<ColumnUInt32,  uint64_t>(values_ht, v, kf);
+            }
+            case Type::Code::UInt64:
+                return appendMapByValueType<ColumnUInt64,  uint64_t>(values_ht, v, u64Key);
+            case Type::Code::Float32:
+                return appendMapByValueType<ColumnFloat32, double>(values_ht, v, f32Key);
+            case Type::Code::Float64:
+                return appendMapByValueType<ColumnFloat64, double>(values_ht, v, f64Key);
+            case Type::Code::UUID:
+                return appendMapByValueType<ColumnUUID,    UUID>(values_ht, v, uuidKey);
+            case Type::Code::LowCardinality: {
+                TypeRef inner = type_as_or_throw<LowCardinalityType>(k, "LowCardinality")->GetNestedType();
+                if (inner->GetCode() == Type::Code::String) {
+                    return appendMapByValueType<ColumnLowCardinalityT<ColumnString>, std::string>(values_ht, v, strKey);
+                }
+                throw std::runtime_error("Unsupported Map key type LowCardinality(" + inner->GetName() + ")");
+            }
+            default:
+                throw std::runtime_error("Unsupported Map(K, V) for row write: " + type->GetName());
+        }
+}
+ColumnRef insertColumn(TypeRef type, zval *value_zval)
+{
+    ConvertDepthGuard depth_guard;  // shared with createColumn / convertToZval
+    zval *array_value;
+    HashTable *values_ht = Z_ARRVAL_P(value_zval);
+
+    switch (type->GetCode())
+    {
+    case Type::Code::UInt64:
+    case Type::Code::UInt8:
+    case Type::Code::UInt16:
+    case Type::Code::UInt32:
+    case Type::Code::Int8:
+    case Type::Code::Int16:
+    case Type::Code::Int32:
+    case Type::Code::Int64:
+        return insertNumericColumn(type->GetCode(), values_ht);
 
     case Type::Code::UUID:
     {
@@ -1602,9 +2290,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::Float32:
-        return appendFloatColumn<ColumnFloat32>(values_ht, "Float32");
     case Type::Code::Float64:
-        return appendFloatColumn<ColumnFloat64>(values_ht, "Float64");
+        return insertNumericColumn(type->GetCode(), values_ht);
 
     case Type::Code::String:
     {
@@ -1612,7 +2299,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            value->Append(strict_zval_string(array_value, "String"));
+            appendStringCell(value.get(), array_value, "String");
         }
         ZEND_HASH_FOREACH_END();
 
@@ -1650,7 +2337,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                     throw std::runtime_error("JSON insert: failed to encode value to JSON");
                 }
                 smart_str_0(&buf);
-                value->Append(std::string(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s)));
+                value->Append(std::string_view(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s)));
                 smart_str_free(&buf);
             } else if (Z_TYPE_P(v) == IS_STRING) {
                 /* Validate the raw JSON text client-side so a malformed
@@ -1679,7 +2366,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 }
                 zval_ptr_dtor(&probe);
 #endif
-                value->Append(std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)));
+                value->Append(std::string_view(Z_STRVAL_P(v), Z_STRLEN_P(v)));
             } else if (Z_TYPE_P(v) == IS_NULL) {
                 if (g_allow_null_in_strict == 0) {
                     throw std::runtime_error(
@@ -1751,75 +2438,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
         return value;
     }
     case Type::Code::IPv4:
-    {
-        /* ColumnIPv4::Append(string) validates via inet_pton and throws on
-         * an empty string, so the empty-string null placeholder String uses
-         * doesn't work. Under AllowNullGuard (a Nullable(IPv4) build), emit
-         * a valid sentinel the null bitmap masks out. */
-        auto value = std::make_shared<ColumnIPv4>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            zval *v = array_value;
-            ZVAL_DEREF(v);
-            if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
-                value->Append(std::string("0.0.0.0"));
-            } else if (Z_TYPE_P(v) == IS_LONG || Z_TYPE_P(v) == IS_DOUBLE) {
-                /* Integer input matches ClickHouse's toIPv4(N): the value is
-                 * the IP with the most-significant byte as the first octet
-                 * (16909060 -> 1.2.3.4). Format to dotted-quad and reuse the
-                 * validated string path rather than ColumnIPv4::Append(uint32),
-                 * whose host/network byte-order handling differs. An integral
-                 * float is accepted too (consistent with the integer columns,
-                 * which take int + integral-double); a fractional float is
-                 * rejected. A string is always treated as a textual IP. */
-                zend_long n;
-                if (Z_TYPE_P(v) == IS_DOUBLE) {
-                    double d = Z_DVAL_P(v), intpart;
-                    if (std::isnan(d) || std::isinf(d) || std::modf(d, &intpart) != 0.0) {
-                        throw std::runtime_error("IPv4 float input must be an integral value");
-                    }
-                    if (d < 0.0 || d > (double)UINT32_MAX) {
-                        throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
-                    }
-                    n = (zend_long)d;
-                } else {
-                    n = Z_LVAL_P(v);
-                }
-                if (n < 0 || (uint64_t)n > UINT32_MAX) {
-                    throw std::runtime_error("IPv4 integer out of range (0 .. 4294967295)");
-                }
-                uint32_t u = (uint32_t)n;
-                char ipbuf[16];
-                snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
-                         (unsigned)((u >> 24) & 0xFF), (unsigned)((u >> 16) & 0xFF),
-                         (unsigned)((u >> 8) & 0xFF),  (unsigned)(u & 0xFF));
-                value->Append(std::string(ipbuf));
-            } else {
-                value->Append(strict_zval_string(v, "IPv4"));
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-        return value;
-    }
     case Type::Code::IPv6:
-    {
-        auto value = std::make_shared<ColumnIPv6>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            zval *v = array_value;
-            ZVAL_DEREF(v);
-            if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
-                value->Append(std::string_view("::"));
-            } else {
-                /* Append(string_view) calls inet_pton on .data(); a view of
-                 * a std::string is NUL-terminated, a bare view need not be. */
-                std::string s = strict_zval_string(v, "IPv6");
-                value->Append(std::string_view(s));
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-        return value;
-    }
+        return insertGeoIpColumn(type->GetCode(), values_ht);
     case Type::Code::FixedString:
     {
         size_t width = parseFixedStringWidth(type);
@@ -1827,12 +2447,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            std::string s = strict_zval_string(array_value, "FixedString");
-            if (s.size() > width) {
-                throw std::runtime_error(
-                    "FixedString value exceeds the declared column width");
-            }
-            value->Append(s);
+            appendFixedStringCell(value.get(), array_value, width, "FixedString");
         }
         ZEND_HASH_FOREACH_END();
 
@@ -1840,147 +2455,12 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::DateTime:
-        /* DateTime: uint32 seconds, 1970-01-01 .. 2106-02-07 06:28:15. */
-        return appendDateColumn<ColumnDateTime>(values_ht, /*is_date=*/false,
-                                                "DateTime", 0, 4294967295LL);
     case Type::Code::DateTime64:
-    {
-        size_t precision = type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision();
-        /* Bound the server-supplied precision before the scale loop: a
-         * precision >= 19 overflows the signed int64 scale (UB), and the
-         * read path already rejects precision > 9. */
-        if (precision > 9) {
-            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
-        }
-        auto value = std::make_shared<ColumnDateTime64>(precision);
-        int64_t scale = pow10_i64(precision);
-
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            zval *v = array_value;
-            ZVAL_DEREF(v);
-            /* Any string is treated as a formatted timestamp; the prior
-             * dash-only gate let "abc" fall through zval_get_long to 0
-             * (epoch). to_time_t_with_frac validates fully. Numeric
-             * inputs go through strict_zval_long / strict_zval_double. */
-            if (Z_TYPE_P(v) == IS_STRING) {
-                auto [whole, frac] = to_time_t_with_frac(
-                    std::string(Z_STRVAL_P(v), Z_STRLEN_P(v)),
-                    precision);
-                /* DR-004: guard whole*scale (+frac) against int64 overflow,
-                 * matching the integer path below. A far-future timestamp
-                 * (e.g. 2262-04-12 at precision 9) otherwise wraps silently to
-                 * a 1900-era value. frac is in [0, scale), so a one-tick
-                 * headroom on the multiply bound covers the add. */
-                int64_t w = (int64_t)whole;
-                if (w > (INT64_MAX - frac) / scale || w < INT64_MIN / scale) {
-                    throw std::runtime_error(
-                        "DateTime64 value out of representable range for this precision");
-                }
-                value->Append(w * scale + frac);
-            } else if (Z_TYPE_P(v) == IS_DOUBLE) {
-                /* The numeric paths take the value as (fractional) seconds
-                 * since the epoch, like DateTime. A double's 52-bit mantissa
-                 * can't hold epoch * 10^precision exactly once precision >= 7,
-                 * so a float would silently round; require a formatted string
-                 * for sub-microsecond precision. */
-                if (precision >= 7) {
-                    throw std::runtime_error(
-                        "DateTime64 precision >= 7 cannot be set from a float without "
-                        "precision loss; pass a formatted date string for sub-microsecond precision");
-                }
-                double d = strict_zval_double(v, "DateTime64");
-                value->Append(checked_double_to_int64(d * scale, "DateTime64"));
-            } else {
-                /* Integer = whole seconds since the epoch, scaled to ticks.
-                 * Guard the multiply against int64 overflow for absurd inputs. */
-                int64_t secs = strict_zval_i64(v, "DateTime64");
-                if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
-                    throw std::runtime_error(
-                        "DateTime64 seconds value out of representable range for this precision");
-                }
-                value->Append(secs * scale);
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-
-        return value;
-    }
     case Type::Code::Date:
-        /* Date: uint16 days, 1970-01-01 .. 2149-06-06 (day 0..65535). */
-        return appendDateColumn<ColumnDate>(values_ht, /*is_date=*/true,
-                                            "Date", 0, 65535LL * 86400 + 86399);
     case Type::Code::Date32:
-        /* Date32: int32 days, 1900-01-01 .. 2299-12-31 (day -25567..120529). */
-        return appendDateColumn<ColumnDate32>(values_ht, /*is_date=*/true,
-                                              "Date32",
-                                              -25567LL * 86400,
-                                              120529LL * 86400 + 86399);
     case Type::Code::Time:
-    {
-        auto value = std::make_shared<ColumnTime>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            ZVAL_DEREF(array_value);
-            /* Time is stored as int seconds-since-midnight; accept only
-             * numeric inputs. String inputs would need an "HH:MM:SS"
-             * parser which the column type doesn't currently expose, so
-             * reject strings explicitly instead of letting zval_get_long
-             * coerce "abc" to 0. */
-            if (Z_TYPE_P(array_value) == IS_STRING) {
-                throw std::runtime_error(
-                    "Time column inserts require numeric seconds; "
-                    "string formatted-time input is not currently supported");
-            }
-            int64_t t = strict_zval_i64(array_value, "Time");
-            if (t < INT32_MIN || t > INT32_MAX) {
-                throw std::runtime_error(
-                    "Time column value out of representable int32 range");
-            }
-            value->Append((int32_t)t);
-        }
-        ZEND_HASH_FOREACH_END();
-        return value;
-    }
     case Type::Code::Time64:
-    {
-        size_t precision = type_as_or_throw<Time64Type>(type, "Time64")->GetPrecision();
-        if (precision > 9) {
-            throw std::runtime_error("Time64 precision out of spec range (0..9)");
-        }
-        auto value = std::make_shared<ColumnTime64>(precision);
-        int64_t scale = pow10_i64(precision);
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value)
-        {
-            zval *v = array_value;
-            ZVAL_DEREF(v);
-            if (Z_TYPE_P(v) == IS_STRING) {
-                throw std::runtime_error(
-                    "Time64 column inserts require numeric seconds; "
-                    "string formatted-time input is not currently supported");
-            }
-            if (Z_TYPE_P(v) == IS_DOUBLE) {
-                if (precision >= 7) {
-                    throw std::runtime_error(
-                        "Time64 precision >= 7 cannot be set from a float without "
-                        "precision loss; pass an integer number of seconds");
-                }
-                double d = strict_zval_double(v, "Time64");
-                value->Append(checked_double_to_int64(d * scale, "Time64"));
-            } else {
-                /* Integer = whole seconds, scaled to ticks; guard the
-                 * multiply against int64 overflow. */
-                int64_t secs = strict_zval_i64(v, "Time64");
-                if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
-                    throw std::runtime_error(
-                        "Time64 seconds value out of representable range for this precision");
-                }
-                value->Append(secs * scale);
-            }
-        }
-        ZEND_HASH_FOREACH_END();
-        return value;
-    }
+        return insertTemporalColumn(type, values_ht);
     case Type::Code::Int128:
     {
         auto value = std::make_shared<ColumnInt128>();
@@ -2051,7 +2531,9 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::Decimal128:
     {
         auto dt = type_as_or_throw<DecimalType>(type, "Decimal");
-        auto value = std::make_shared<ColumnDecimal>(dt->GetPrecision(), dt->GetScale());
+        size_t dec_precision = dt->GetPrecision();
+        size_t dec_scale = dt->GetScale();
+        auto value = std::make_shared<ColumnDecimal>(dec_precision, dec_scale);
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
             zval *v = array_value;
@@ -2073,7 +2555,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             } else {
                 ZStrGuard sg(v);
                 std::string dv(sg.val(), sg.len());
-                validateDecimalText(dv, dt->GetPrecision(), dt->GetScale(), "Decimal");
+                validateDecimalText(dv, dec_precision, dec_scale, "Decimal");
                 value->Append(dv);
             }
         }
@@ -2262,217 +2744,13 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 
     case Type::Code::Map:
-    {
-        TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
-        TypeRef v = type_as_or_throw<MapType>(type, "Map")->GetValueType();
-        Type::Code kc = k->GetCode();
-
-        MapInputShape input_shape = classifyMapInput(values_ht);
-        if (input_shape == MapInputShape::Mixed) {
-            throw std::runtime_error(
-                "Map rows must consistently use associative arrays or ordered key/value pairs");
-        }
-        if (input_shape == MapInputShape::Pairs) {
-            return appendMapPairsColumn(values_ht, k, v);
-        }
-
-        // String keys reject integer-keyed PHP entries outright; integer
-        // keys parse the string form or fall back to the numeric key.
-        // Numeric parsers reject anything that doesn't consume the full
-        // string (PHP's strtoll silently returned 0 for "abc" before).
-        auto strKey = [](zend_string *zk, zend_ulong) -> std::string {
-            if (!zk) {
-                throw std::runtime_error("Map(String, *) row entry must have a string key");
-            }
-            return std::string(ZSTR_VAL(zk), ZSTR_LEN(zk));
-        };
-        /* PHP zend_string is length-prefixed and may contain embedded
-         * NUL bytes. Comparing endp against ZSTR_LEN is the right
-         * "fully consumed" check; checking *endp == '\0' would let
-         * "123\x00garbage" silently parse as 123 because endp would
-         * land on the NUL. */
-        auto i64Key = [](zend_string *zk, zend_ulong nk) -> int64_t {
-            if (!zk) return (int64_t)(zend_long)nk;
-            const char *s = ZSTR_VAL(zk);
-            char *endp = NULL;
-            errno = 0;
-            long long v = strtoll(s, &endp, 10);
-            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
-                throw std::runtime_error(
-                    std::string("Map integer key is not a valid number: ") +
-                    std::string(s, ZSTR_LEN(zk)));
-            }
-            return (int64_t)v;
-        };
-        auto u64Key = [](zend_string *zk, zend_ulong nk) -> uint64_t {
-            if (!zk) {
-                zend_long signed_key = (zend_long)nk;
-                if (signed_key < 0) {
-                    throw std::runtime_error("Map unsigned key cannot be negative");
-                }
-                return (uint64_t)signed_key;
-            }
-            const char *s = ZSTR_VAL(zk);
-            char *endp = NULL;
-            errno = 0;
-            unsigned long long v = strtoull(s, &endp, 10);
-            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
-                throw std::runtime_error(
-                    std::string("Map unsigned key is not a valid number: ") +
-                    std::string(s, ZSTR_LEN(zk)));
-            }
-            return (uint64_t)v;
-        };
-        auto f64Key = [](zend_string *zk, zend_ulong nk) -> double {
-            if (!zk) return (double)(zend_long)nk;
-            const char *s = ZSTR_VAL(zk);
-            char *endp = NULL;
-            errno = 0;
-            double v = strtod(s, &endp);
-            if (errno == ERANGE || endp == s || (size_t)(endp - s) != ZSTR_LEN(zk)) {
-                throw std::runtime_error(
-                    std::string("Map float key is not a valid number: ") +
-                    std::string(s, ZSTR_LEN(zk)));
-            }
-            return v;
-        };
-        auto f32Key = [&](zend_string *zk, zend_ulong nk) -> double {
-            double v = f64Key(zk, nk);
-            double max = (double)std::numeric_limits<float>::max();
-            if (v < -max || v > max) {
-                throw std::runtime_error("Map key out of range for Float32");
-            }
-            return v;
-        };
-        auto uuidKey = [](zend_string *zk, zend_ulong) -> UUID {
-            if (!zk) {
-                throw std::runtime_error("Map(UUID, *) row entry must have a string key");
-            }
-            return parseUUIDString(ZSTR_VAL(zk), ZSTR_LEN(zk), "UUID key format error");
-        };
-
-        /* Narrow-key wrappers: same range-check the value side gained for
-         * narrow Map columns. Keys arrive as decimal strings; the parsed
-         * int64 must still fit the destination column width. */
-        auto narrowKeyI = [&](zend_string *zk, zend_ulong nk,
-                              int64_t lo, int64_t hi, const char *t) -> int64_t {
-            int64_t parsed = i64Key(zk, nk);
-            if (parsed < lo || parsed > hi) {
-                throw std::runtime_error(std::string("Map key out of range for ") + t);
-            }
-            return parsed;
-        };
-        auto narrowKeyU = [&](zend_string *zk, zend_ulong nk,
-                              uint64_t hi, const char *t) -> uint64_t {
-            uint64_t parsed = u64Key(zk, nk);
-            if (parsed > hi) {
-                throw std::runtime_error(std::string("Map key out of range for ") + t);
-            }
-            return parsed;
-        };
-
-        switch (kc) {
-            case Type::Code::String:
-                return appendMapByValueType<ColumnString,  std::string>(values_ht, v, strKey);
-            case Type::Code::Int8: {
-                auto kf = [&](zend_string *zk, zend_ulong nk) {
-                    return narrowKeyI(zk, nk, INT8_MIN, INT8_MAX, "Int8");
-                };
-                return appendMapByValueType<ColumnInt8,    int64_t>(values_ht, v, kf);
-            }
-            case Type::Code::Int16: {
-                auto kf = [&](zend_string *zk, zend_ulong nk) {
-                    return narrowKeyI(zk, nk, INT16_MIN, INT16_MAX, "Int16");
-                };
-                return appendMapByValueType<ColumnInt16,   int64_t>(values_ht, v, kf);
-            }
-            case Type::Code::Int32: {
-                auto kf = [&](zend_string *zk, zend_ulong nk) {
-                    return narrowKeyI(zk, nk, INT32_MIN, INT32_MAX, "Int32");
-                };
-                return appendMapByValueType<ColumnInt32,   int64_t>(values_ht, v, kf);
-            }
-            case Type::Code::Int64:
-                return appendMapByValueType<ColumnInt64,   int64_t>(values_ht, v, i64Key);
-            case Type::Code::UInt8: {
-                auto kf = [&](zend_string *zk, zend_ulong nk) {
-                    return narrowKeyU(zk, nk, UINT8_MAX, "UInt8");
-                };
-                return appendMapByValueType<ColumnUInt8,   uint64_t>(values_ht, v, kf);
-            }
-            case Type::Code::UInt16: {
-                auto kf = [&](zend_string *zk, zend_ulong nk) {
-                    return narrowKeyU(zk, nk, UINT16_MAX, "UInt16");
-                };
-                return appendMapByValueType<ColumnUInt16,  uint64_t>(values_ht, v, kf);
-            }
-            case Type::Code::UInt32: {
-                auto kf = [&](zend_string *zk, zend_ulong nk) {
-                    return narrowKeyU(zk, nk, UINT32_MAX, "UInt32");
-                };
-                return appendMapByValueType<ColumnUInt32,  uint64_t>(values_ht, v, kf);
-            }
-            case Type::Code::UInt64:
-                return appendMapByValueType<ColumnUInt64,  uint64_t>(values_ht, v, u64Key);
-            case Type::Code::Float32:
-                return appendMapByValueType<ColumnFloat32, double>(values_ht, v, f32Key);
-            case Type::Code::Float64:
-                return appendMapByValueType<ColumnFloat64, double>(values_ht, v, f64Key);
-            case Type::Code::UUID:
-                return appendMapByValueType<ColumnUUID,    UUID>(values_ht, v, uuidKey);
-            case Type::Code::LowCardinality: {
-                TypeRef inner = type_as_or_throw<LowCardinalityType>(k, "LowCardinality")->GetNestedType();
-                if (inner->GetCode() == Type::Code::String) {
-                    return appendMapByValueType<ColumnLowCardinalityT<ColumnString>, std::string>(values_ht, v, strKey);
-                }
-                throw std::runtime_error("Unsupported Map key type LowCardinality(" + inner->GetName() + ")");
-            }
-            default:
-                throw std::runtime_error("Unsupported Map(K, V) for row write: " + type->GetName());
-        }
-    }
+        return insertMapColumn(type, values_ht);
 
     case Type::Code::Point:
-    {
-        auto col = std::make_shared<ColumnPoint>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-            col->Append(phpToPoint(array_value));
-        } ZEND_HASH_FOREACH_END();
-        return col;
-    }
     case Type::Code::Ring:
-    {
-        auto col = std::make_shared<ColumnRing>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-            col->Append(phpToRing(array_value));
-        } ZEND_HASH_FOREACH_END();
-        return col;
-    }
     case Type::Code::Polygon:
-    {
-        auto col = std::make_shared<ColumnPolygon>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-            col->Append(phpToPolygon(array_value));
-        } ZEND_HASH_FOREACH_END();
-        return col;
-    }
     case Type::Code::MultiPolygon:
-    {
-        auto col = std::make_shared<ColumnMultiPolygon>();
-        ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-            ZVAL_DEREF(array_value);
-            if (Z_TYPE_P(array_value) != IS_ARRAY) {
-                throw std::runtime_error("MultiPolygon must be a PHP array of polygons");
-            }
-            std::vector<std::vector<std::vector<std::tuple<double, double>>>> mp;
-            zval *poly;
-            ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array_value), poly) {
-                mp.push_back(phpToPolygon(poly));
-            } ZEND_HASH_FOREACH_END();
-            col->Append(mp);
-        } ZEND_HASH_FOREACH_END();
-        return col;
-    }
+        return insertGeoIpColumn(type->GetCode(), values_ht);
 
     case Type::Code::Void:
     {
@@ -2676,11 +2954,12 @@ static void emitEnumColumn(zval *arr, const ColumnRef& columnRef, int row,
     emitStringCell(arr, name.data(), name.length(), column_name, is_array, fetch_mode);
 }
 
-void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
+/* Numeric read family: every int/uint width shares emitIntColumn, both
+ * float widths share emitDoubleCell. */
+static void readNumericCell(Type::Code code, zval *arr, const ColumnRef& columnRef, int row,
+                            const string& column_name, int8_t is_array, long fetch_mode)
 {
-    ConvertDepthGuard depth_guard;  // shared with createColumn / insertColumn
-    switch (columnRef->Type()->GetCode())
-    {
+    switch (code) {
     case Type::Code::UInt64:
         emitIntColumn<ColumnUInt64>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
@@ -2693,15 +2972,6 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::UInt32:
         emitIntColumn<ColumnUInt32>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
-    case Type::Code::IPv4:
-    {
-        /* As above, ColumnIPv4 is no longer a ColumnUInt32 subclass in
-         * v2.6.1; emit as canonical dotted-quad string via AsString(). */
-        auto col_ip = as_or_throw<ColumnIPv4>(columnRef, "IPv4 read");
-        std::string s = col_ip->AsString(row);
-        emitStringCell(arr, s.data(), s.size(), column_name, is_array, fetch_mode);
-        break;
-    }
     case Type::Code::Int8:
         emitIntColumn<ColumnInt8>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
@@ -2714,6 +2984,53 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Int64:
         emitIntColumn<ColumnInt64>(arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
+    case Type::Code::Float32:
+        emitDoubleCell(arr, static_cast<double>((*fast_scalar_col<ColumnFloat32>(columnRef))[row]),
+                       column_name, is_array, fetch_mode);
+        break;
+    case Type::Code::Float64:
+        emitDoubleCell(arr, (double)(*fast_scalar_col<ColumnFloat64>(columnRef))[row],
+                       column_name, is_array, fetch_mode);
+        break;
+    default:
+        throw std::logic_error("readNumericCell: non-numeric type code");
+    }
+}
+
+void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
+{
+    ConvertDepthGuard depth_guard;  // shared with createColumn / insertColumn
+    switch (columnRef->Type()->GetCode())
+    {
+    case Type::Code::UInt64:
+    case Type::Code::UInt8:
+    case Type::Code::UInt16:
+    case Type::Code::UInt32:
+        readNumericCell(columnRef->Type()->GetCode(), arr, columnRef, row, column_name, is_array, fetch_mode);
+        break;
+    case Type::Code::IPv4:
+    {
+        /* ColumnIPv4 is no longer a ColumnUInt32 subclass in v2.6.1, so
+         * emit the canonical dotted-quad string. At() + inet_ntop into a
+         * stack buffer is exactly what AsString() does internally, minus
+         * its per-cell std::string heap allocation. */
+        auto col_ip = as_or_throw<ColumnIPv4>(columnRef, "IPv4 read");
+        in_addr addr = col_ip->At(row);
+        char buf[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &addr, buf, sizeof(buf))) {
+            throw std::system_error(
+                std::error_code(errno, std::generic_category()),
+                "Invalid IPv4 data");
+        }
+        emitStringCell(arr, buf, strlen(buf), column_name, is_array, fetch_mode);
+        break;
+    }
+    case Type::Code::Int8:
+    case Type::Code::Int16:
+    case Type::Code::Int32:
+    case Type::Code::Int64:
+        readNumericCell(columnRef->Type()->GetCode(), arr, columnRef, row, column_name, is_array, fetch_mode);
+        break;
     case Type::Code::UUID:
     {
         auto uuid_col = as_or_throw<ColumnUUID>(columnRef, "UUID read");
@@ -2725,12 +3042,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         break;
     }
     case Type::Code::Float32:
-        emitDoubleCell(arr, static_cast<double>((*fast_scalar_col<ColumnFloat32>(columnRef))[row]),
-                       column_name, is_array, fetch_mode);
-        break;
     case Type::Code::Float64:
-        emitDoubleCell(arr, (double)(*fast_scalar_col<ColumnFloat64>(columnRef))[row],
-                       column_name, is_array, fetch_mode);
+        readNumericCell(columnRef->Type()->GetCode(), arr, columnRef, row, column_name, is_array, fetch_mode);
         break;
     case Type::Code::Decimal:
     case Type::Code::Decimal32:
@@ -2743,18 +3056,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         // decimal point and any leading-zero padding are inserted in
         // place in the stack buffer so no std::string allocations fire
         // per cell. Worst case: 1 byte sign + 39 digits + 1 '.' = 41.
-        auto dec_type = columnRef->Type()->As<DecimalType>();
-        size_t scale = dec_type ? dec_type->GetScale() : 0;
-        /* scale is server-declared and otherwise unbounded; the in-place
-         * pad/point insertion below writes up to ~scale bytes past the
-         * formatted digits into the fixed 64-byte buffer. ClickHouse
-         * Decimal128 caps scale at 38, so anything larger is either a
-         * Decimal256 (unsupported here) or a hostile/MITM server schema —
-         * reject before it can smash the stack. Mirrors the DateTime64
-         * precision>9 guard on this same read path. */
-        if (scale > 38) {
-            throw std::runtime_error("Decimal scale out of supported range (max 38)");
-        }
+        /* Scale is memoized per column (see cachedDecimalScale); the >38
+         * guard lives on the resolve path. Decimal128 caps scale at 38,
+         * so anything larger is a Decimal256 (unsupported here) or a
+         * hostile/MITM server schema. */
+        size_t scale = cachedDecimalScale(columnRef->Type());
         Int128 raw = col->At(row);
         char buf[64];
         size_t l = format_int128_dec(raw, buf);
@@ -2826,6 +3132,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             /* php_json_decode takes char* (not const) on PHP 7.4; &str[0]
              * is a mutable, NUL-terminated pointer on every target. */
             std::string json_str(sv);
+            /* Bound the decode: an unbounded server cell would amplify into
+             * the PHP value graph before the parser-depth bound matters. */
+            if (json_str.size() > MAX_JSON_CELL_BYTES) {
+                throw std::runtime_error("JSON read: cell exceeds maximum JSON decode size (16 MiB)");
+            }
             /* ZVAL_UNDEF first: php_json_decode does not touch the output zval
              * on FAILURE, so the old unconditional zval_ptr_dtor(&decoded) ran
              * over uninitialized stack memory whenever the server sent a value
@@ -2877,13 +3188,19 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::IPv6:
     {
-        /* clickhouse-cpp v2.6.1 made ColumnIPv6 a sibling of ColumnFixedString
-         * (composition, not inheritance), so As<ColumnFixedString>() returns
-         * null and crashed every IPv6 read. Use AsString() to get the
-         * canonical "::1" form. */
+        /* ColumnIPv6 is a ColumnFixedString sibling since v2.6.1
+         * (composition, not inheritance), so read the canonical form via
+         * At() + inet_ntop into a stack buffer -- what AsString() does
+         * internally, minus its per-cell std::string heap allocation. */
         auto col_ip = as_or_throw<ColumnIPv6>(columnRef, "IPv6 read");
-        std::string s = col_ip->AsString(row);
-        emitStringCell(arr, s.data(), s.size(), column_name, is_array, fetch_mode);
+        in6_addr addr = col_ip->At(row);
+        char buf[INET6_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET6, &addr, buf, sizeof(buf))) {
+            throw std::system_error(
+                std::error_code(errno, std::generic_category()),
+                "Invalid IPv6 data");
+        }
+        emitStringCell(arr, buf, strlen(buf), column_name, is_array, fetch_mode);
         break;
     }
 
@@ -2897,10 +3214,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::DateTime64:
     {
         auto col = as_or_throw<ColumnDateTime64>(columnRef, "DateTime64 read");
-        size_t precision = type_as_or_throw<DateTime64Type>(columnRef->Type(), "DateTime64")->GetPrecision();
-        if (precision > 9) {
-            throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
-        }
+        size_t precision = cachedDateTime64Precision(columnRef->Type());
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
         /* Floor division: C++ integer division truncates toward zero, so a
@@ -2970,10 +3284,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Time64:
     {
         auto col = as_or_throw<ColumnTime64>(columnRef, "Time64 read");
-        size_t precision = type_as_or_throw<Time64Type>(columnRef->Type(), "Time64")->GetPrecision();
-        if (precision > 9) {
-            throw std::runtime_error("Time64 precision out of spec range (0..9)");
-        }
+        size_t precision = cachedTime64Precision(columnRef->Type());
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
@@ -3199,10 +3510,11 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         ColumnRef keys_any = (*tup)[0];
         ColumnRef values_any = (*tup)[1];
         size_t entry_count = keys_any->Size();
-        /* Defensive: a malformed/malicious server response could report
-         * key-count > value-count; subsequent At(i) on values would read
-         * past the value column. */
-        if (values_any->Size() < entry_count) {
+        /* Defensive: a malformed/malicious server response could disagree on
+         * key/value counts in either direction; decoding past the shorter
+         * column reads out of bounds, and silently accepting an oversize
+         * value column would drop server data. */
+        if (values_any->Size() != entry_count) {
             throw std::runtime_error("Map column key/value size mismatch");
         }
 
@@ -3472,8 +3784,13 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             addStrL(kkind, sb, lk, dk, buf, len);
         };
 
+        /* Reuse the key scratch buffer across entries: decodeKey assigns
+         * into it (assign() keeps capacity), so a Map(String, V) with N
+         * entries allocates once instead of N times. The per-row tuple
+         * slice above (GetAsColumn) stays: ColumnMap exposes no offset
+         * accessor, so avoiding it would need vendored-API changes. */
+        std::string str_key_buf;
         for (size_t i = 0; i < entry_count; ++i) {
-            std::string str_key_buf;
             zend_long long_key = 0;
             double dbl_key = 0.0;
             int kkind = decodeKey(i, str_key_buf, long_key, dbl_key);

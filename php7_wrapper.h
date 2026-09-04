@@ -133,6 +133,13 @@ static zend_always_inline void zend_declare_typed_class_constant(
  * keeps the type info but drops the default-value annotation. */
 # define ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(pass_by_ref, name, type, allow_null, default_value) \
     ZEND_ARG_TYPE_INFO(pass_by_ref, name, type, allow_null)
+/* ZEND_ARG_TYPE_MASK is PHP 8.0+ (union-typed parameters such as
+ * setVerbose's bool|callable|null). Pre-8.0 cannot express a union in
+ * zend_arg_info, so drop to untyped, mirroring the IS_MIXED precedent.
+ * The mask and default arguments go unused, so version-specific MAY_BE_*
+ * tokens in the mask (e.g. MAY_BE_CALLABLE) never expand here. */
+# define ZEND_ARG_TYPE_MASK(pass_by_ref, name, type_mask, default_value) \
+    ZEND_ARG_TYPE_INFO(pass_by_ref, name, 0, 0)
 /* IS_MIXED is a PHP 8.0+ type tag (value 0x09). On 7.4 it isn't
  * declared. Return-type uses are stripped above by the
  * ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX shim, but parameter types

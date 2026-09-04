@@ -2,6 +2,9 @@
 
 /** @generate-class-entries */
 
+/** Legacy class-name aliases for this class and ClickHouseException stay
+ * registered for source compatibility; using them raises no runtime
+ * deprecation at this time. */
 final class ClickHouse
 {
     public const int FETCH_ONE = 1;
@@ -50,6 +53,12 @@ final class ClickHouse
         array $settings = []
     ): mixed {}
 
+    /**
+     * Write query rows to $stream as TSV/CSV. $params is required (pass []
+     * when the query has no placeholders). FixedString cells are emitted
+     * with trailing NUL padding trimmed; use select() with
+     * FIXEDSTRING_BINARY for binary-exact reads.
+     */
     public function selectToStream(
         string $sql,
         array $params,
@@ -114,7 +123,12 @@ final class ClickHouse
 
     public function setProfileCallback(?callable $callback): bool {}
 
-    public function setVerbose(mixed $sink): static {}
+    /**
+     * Enable protocol-level lifecycle tracing: true logs JSON lines on
+     * STDERR, false or null disables, a callable receives each event.
+     * Chainable.
+     */
+    public function setVerbose(bool|callable|null $sink): static {}
 
     public function resetConnection(): bool {}
 
@@ -140,6 +154,13 @@ final class ClickHouse
 
     public function getLogQueries(): array {}
 
+    /**
+     * Lazy row iterator. Only the value-shaping fetch flags apply
+     * (DATE_AS_STRINGS, JSON_AS_ARRAY / JSON_AS_OBJECT, UUID_WITH_DASHES,
+     * FIXEDSTRING_BINARY, MAP_AS_PAIRS); the row-shape flags (FETCH_ONE /
+     * FETCH_KEY_PAIR / FETCH_COLUMN) are ignored. $fetch_mode is the
+     * trailing argument.
+     */
     public function selectStream(
         string $sql,
         array $params = [],
@@ -148,6 +169,13 @@ final class ClickHouse
         int $fetch_mode = 0
     ): ClickHouseRowIterator {}
 
+    /**
+     * Buffered result wrapper. Only the value-shaping fetch flags apply
+     * (DATE_AS_STRINGS, JSON_AS_ARRAY / JSON_AS_OBJECT, UUID_WITH_DASHES,
+     * FIXEDSTRING_BINARY, MAP_AS_PAIRS); the row-shape flags (FETCH_ONE /
+     * FETCH_KEY_PAIR / FETCH_COLUMN) are ignored since the statement always
+     * carries full rows.
+     */
     public function selectStatement(
         string $sql,
         array $params = [],
@@ -156,6 +184,13 @@ final class ClickHouse
         int $fetch_mode = 0
     ): ClickHouseStatement {}
 
+    /**
+     * Per-row streaming read. Only the value-shaping fetch flags apply
+     * (DATE_AS_STRINGS, JSON_AS_ARRAY / JSON_AS_OBJECT, UUID_WITH_DASHES,
+     * FIXEDSTRING_BINARY, MAP_AS_PAIRS); the row-shape flags (FETCH_ONE /
+     * FETCH_KEY_PAIR / FETCH_COLUMN) are ignored. $fetch_mode is the
+     * trailing argument.
+     */
     public function selectStreamCallback(
         string $sql,
         callable $callback,
@@ -197,7 +232,11 @@ final class ClickHouseRowIterator implements Iterator, Countable
 
 final class ClickHouseStatement implements Iterator, Countable, ArrayAccess, JsonSerializable
 {
-    private function __construct() {}
+    /**
+     * Not callable directly: always throws ClickHouseException. Obtain
+     * instances from ClickHouse::selectStatement().
+     */
+    public function __construct() {}
 
     public function count(): int {}
 
@@ -215,8 +254,10 @@ final class ClickHouseStatement implements Iterator, Countable, ArrayAccess, Jso
 
     public function offsetGet(mixed $offset): mixed {}
 
+    /** @throws ClickHouseException always: statements are read-only. */
     public function offsetSet(mixed $offset, mixed $value): void {}
 
+    /** @throws ClickHouseException always: statements are read-only. */
     public function offsetUnset(mixed $offset): void {}
 
     public function jsonSerialize(): array {}
@@ -225,8 +266,18 @@ final class ClickHouseStatement implements Iterator, Countable, ArrayAccess, Jso
 
     public function statistics(): array {}
 
+    /**
+     * First result row: null when the result is empty, the scalar cell when
+     * the row holds a single column, otherwise the full assoc row.
+     */
     public function fetchOne(): mixed {}
 
+    /**
+     * Column 0 => column 1 map over every row; [] when the result is empty.
+     * Throws when any row holds fewer than 2 columns or the key column is
+     * not scalar (array / object keys are rejected rather than collapsing
+     * onto the string "Array").
+     */
     public function fetchKeyPair(): array {}
 
     public function fetchColumn(): array {}
