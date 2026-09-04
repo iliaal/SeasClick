@@ -4,10 +4,10 @@
 
 | Version | Supported          |
 |---------|--------------------|
+| 0.11.x  | :white_check_mark: |
 | 0.10.x  | :white_check_mark: |
-| 0.9.x   | :white_check_mark: |
-| 0.8.x   | security fixes only |
-| ≤ 0.7.x | :x:                |
+| 0.9.x   | security fixes only |
+| ≤ 0.8.x | :x:                |
 
 Once 1.0 ships, the two most recent minor versions will receive
 security fixes.

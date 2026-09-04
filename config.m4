@@ -49,6 +49,8 @@ if test "$PHP_CLICKHOUSE" != "no"; then
   esac
 
   clickhouse_source_file="clickhouse.cpp \
+        metadata.cpp \
+        query_log.cpp \
         typesToPhp.cpp \
         $CLICKHOUSE_SSL_SRC \
         lib/clickhouse-cpp/clickhouse/base/compressed.cpp \
@@ -83,10 +85,10 @@ if test "$PHP_CLICKHOUSE" != "no"; then
         lib/clickhouse-cpp/clickhouse/block.cpp \
         lib/clickhouse-cpp/clickhouse/client.cpp \
         lib/clickhouse-cpp/clickhouse/query.cpp \
+        lib/clickhouse-cpp/contrib/absl/absl/numeric/int128.cc \
         lib/clickhouse-cpp/contrib/cityhash/cityhash/city.cc \
         lib/clickhouse-cpp/contrib/lz4/lz4/lz4.c \
         lib/clickhouse-cpp/contrib/lz4/lz4/lz4hc.c \
-        lib/clickhouse-cpp/contrib/absl/absl/numeric/int128.cc \
         lib/clickhouse-cpp/contrib/zstd/zstd/common/debug.c \
         lib/clickhouse-cpp/contrib/zstd/zstd/common/entropy_common.c \
         lib/clickhouse-cpp/contrib/zstd/zstd/common/error_private.c \

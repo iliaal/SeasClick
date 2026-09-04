@@ -75,8 +75,9 @@ When bumping it:
    silently regresses the fixes the test suite depends on.
 3. Update the source list in `config.m4`. The list there is
    alphabetical by directory; keep that order.
-4. Run the full test suite against ClickHouse `latest` (the test
-   server in CI is `clickhouse/clickhouse-server:latest`).
+4. Run the full test suite against the pinned
+   `clickhouse/clickhouse-server` digest in `.github/workflows/tests.yml`
+   (the `services.clickhouse.image` pin), not `:latest`.
 5. Note any breaking changes in `CHANGELOG.md` under the unreleased
    section.
 

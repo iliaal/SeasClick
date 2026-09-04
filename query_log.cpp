@@ -1,0 +1,205 @@
+/*
+  +----------------------------------------------------------------------+
+  | php_clickhouse                                                       |
+  +----------------------------------------------------------------------+
+  | Copyright (c) 1997-2026 The PHP Group                                |
+  +----------------------------------------------------------------------+
+  | This source file is subject to version 3.01 of the PHP license,      |
+  | that is bundled with this package in the file LICENSE, and is        |
+  | available through the world-wide-web at the following url:           |
+  | http://www.php.net/license/3_01.txt                                  |
+  | If you did not receive a copy of the PHP license and are unable to   |
+  | obtain it through the world-wide-web, please send a note to          |
+  | license@php.net so we can mail you a copy immediately.               |
+  +----------------------------------------------------------------------+
+  | Author: Ilia Alshanetsky <ilia@ilia.ws>                              |
+  +----------------------------------------------------------------------+
+*/
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+extern "C" {
+#include "php.h"
+#include "php_ini.h"
+#include "ext/standard/info.h"
+#include "Zend/zend_exceptions.h"
+#include "php7_wrapper.h"
+}
+
+#include "php_clickhouse.h"
+
+#include "lib/clickhouse-cpp/clickhouse/client.h"
+#include "lib/clickhouse-cpp/clickhouse/exceptions.h"
+#include "clickhouse_internal.h"
+
+using namespace clickhouse;
+using namespace std;
+
+/*
+ * Append a completed-query record to the per-client log if logging is
+ * enabled. Pulls elapsed_ms / rows_read / bytes_read from the just-
+ * populated stats. No-op when logging is off so the hot path stays
+ * cheap on production deployments.
+ */
+/* Cap on retained QueryLog entries before getLogQueries() is called to
+ * drain. A long-running PHP-FPM worker with logging on otherwise grows
+ * the vector unboundedly (each entry holds two arbitrary-length strings).
+ * When the cap is reached we drop the oldest in-place. */
+#define CLICKHOUSE_QUERY_LOG_MAX 1024
+#define CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES 8192
+
+std::string queryLogString(const std::string &value)
+{
+    if (value.size() <= CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES) {
+        return value;
+    }
+    static const char suffix[] = "... (truncated)";
+    constexpr size_t suffix_len = sizeof(suffix) - 1;
+    constexpr size_t prefix_len = CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES - suffix_len;
+    std::string out(value.data(), prefix_len);
+    out.append(suffix, suffix_len);
+    return out;
+}
+
+/*
+ * Redact single-quoted string literals in SQL retained for the query log
+ * and verbose trace. Logged SQL keeps its shape (keywords, identifiers,
+ * placeholders) but not bound secrets: '...' becomes '?', honoring ''
+ * and backslash escapes; an unterminated literal redacts to end of input.
+ * Exception messages keep their existing sanitizeError handling as-is.
+ */
+std::string redactSqlLiterals(const std::string &sql)
+{
+    std::string out;
+    out.reserve(sql.size());
+    for (size_t i = 0; i < sql.size();) {
+        if (sql[i] != '\'') {
+            out.push_back(sql[i++]);
+            continue;
+        }
+        out.append("'?'");
+        ++i;
+        while (i < sql.size()) {
+            if (sql[i] == '\\' && i + 1 < sql.size()) {
+                i += 2;
+                continue;
+            }
+            if (sql[i] == '\'') {
+                if (i + 1 < sql.size() && sql[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                ++i;
+                break;
+            }
+            ++i;
+        }
+    }
+    return out;
+}
+
+void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql)
+{
+    if (obj->query_log.size() >= CLICKHOUSE_QUERY_LOG_MAX) {
+        obj->query_log.pop_front();
+    }
+    obj->query_log.push_back(std::move(ql));
+}
+
+/* Build the QueryLog row shared by success and error paths. Caller fills
+ * error_code / error_message for the error variant. */
+QueryLog buildQueryLog(const clickhouse_object *obj,
+                       const std::string &sql, const std::string &qid)
+{
+    QueryLog ql;
+    ql.sql = queryLogString(redactSqlLiterals(sql));
+    ql.query_id = queryLogString(qid);
+    ql.elapsed_ms = obj->stats.elapsed_ms;
+    ql.rows_read = obj->stats.rows_read;
+    ql.bytes_read = obj->stats.bytes_read;
+    return ql;
+}
+
+void recordQuerySuccess(clickhouse_object *obj, const std::string &sql, const std::string &qid)
+{
+    if (!obj->log_enabled) return;
+    /* Never let a nested allocation failure here escape the wrapper. The caller
+     * may already be inside a catch-block (recording the previous error); a
+     * second uncaught exception would call std::terminate. */
+    try {
+        appendQueryLogCapped(obj, buildQueryLog(obj, sql, qid));
+    } catch (...) { /* swallow; logging is best-effort */ }
+}
+
+void recordQueryError(clickhouse_object *obj, const std::string &sql, const std::string &qid, const std::exception &e)
+{
+    if (!obj->log_enabled) return;
+    try {
+        QueryLog ql = buildQueryLog(obj, sql, qid);
+        if (auto se = dynamic_cast<const clickhouse::ServerException*>(&e)) {
+            ql.error_code = se->GetException().code;
+        } else {
+            ql.error_code = -1;
+        }
+        ql.error_message = sanitizeError(e.what());
+        appendQueryLogCapped(obj, std::move(ql));
+    } catch (...) { /* swallow; logging must not throw from inside a catch */ }
+}
+
+/* {{{ proto bool enableLogQueries(bool enabled = true)
+ *
+ * Toggle the query log accumulator. While enabled, each completed
+ * select / insert / execute / writeStart appends an entry. Toggling
+ * off does NOT clear; getLogQueries() returns and clears.
+ */
+PHP_METHOD(ClickHouse, enableLogQueries)
+{
+    zend_bool enabled = 1;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(enabled)
+    ZEND_PARSE_PARAMETERS_END();
+    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    obj->log_enabled = (enabled != 0);
+    RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ proto array getLogQueries()
+ *
+ * Return all accumulated query log entries and clear the buffer. Each
+ * entry is an associative array: sql, query_id, elapsed_ms, rows_read,
+ * bytes_read, error_code (0 = success, server code on server error,
+ * -1 on client/network error), error_message.
+ */
+PHP_METHOD(ClickHouse, getLogQueries)
+{
+    if (zend_parse_parameters_none() == FAILURE) return;
+    clickhouse_object *obj = Z_CLICKHOUSE_P(getThis());
+    array_init(return_value);
+    for (const auto &ql : obj->query_log) {
+        zval entry;
+        array_init(&entry);
+        add_assoc_stringl(&entry, "sql", (char*)ql.sql.c_str(), ql.sql.size());
+        add_assoc_stringl(&entry, "query_id", (char*)ql.query_id.c_str(), ql.query_id.size());
+        add_assoc_double(&entry, "elapsed_ms", ql.elapsed_ms);
+        addAssocUInt64(&entry, "rows_read", ql.rows_read);
+        addAssocUInt64(&entry, "bytes_read", ql.bytes_read);
+        add_assoc_long(&entry, "error_code", (zend_long)ql.error_code);
+        add_assoc_stringl(&entry, "error_message",
+            (char*)ql.error_message.c_str(), ql.error_message.size());
+        add_next_index_zval(return_value, &entry);
+    }
+    obj->query_log.clear();
+}
+/* }}} */
+
+/*
+ * Local variables:
+ * tab-width: 4
+ * c-basic-offset: 4
+ * End:
+ * vim600: noet sw=4 ts=4 fdm=marker
+ * vim<600: noet sw=4 ts=4
+ */
