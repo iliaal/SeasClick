@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-04
+
+### Fixed
+
+- Date, Date32, and DateTime reads and inserts no longer narrow through 32-bit `time_t`: epoch values are carried as `int64` end to end, so out-of-2038 values round-trip on 32-bit PHP instead of truncating, and valid `Date32` bounds (`1900-01-01` .. `2299-12-31`) are accepted instead of rejected.
+- Tests `086` / `090` / `159` / `185` branch their 64-bit-only expectations on `PHP_INT_SIZE`, and the x86 Windows lane requires `209` (which needs no server), so 32-bit coverage executes in CI instead of shipping unexercised.
+
 ## [0.12.0] - 2026-09-04
 
 ### Added
@@ -976,7 +983,8 @@ own way.
   emits a clear "unsupported" warning. Full Windows build of the
   vendored zstd + absl + lz4 + cityhash is a separate project.
 
-[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.12.0...HEAD
+[Unreleased]: https://github.com/iliaal/php_clickhouse/compare/0.12.1...HEAD
+[0.12.1]: https://github.com/iliaal/php_clickhouse/releases/tag/0.12.1
 [0.12.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.12.0
 [0.11.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.11.0
 [0.10.0]: https://github.com/iliaal/php_clickhouse/releases/tag/0.10.0
