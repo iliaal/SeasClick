@@ -47,6 +47,7 @@ jobs:
   build:
     name: ${{ matrix.platform.os }} php ${{ matrix.php }}
     runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
     permissions:
       contents: write # Uploads built archives to the selected release.
     strategy:
@@ -76,13 +77,13 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.macos_target }}
     steps:
       # release -> the tag; dispatch-with-tag -> that tag; blank -> triggering branch.
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.release.tag_name || inputs.release_tag }}
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # master
         with:
           php-version: ${{ matrix.php }}
           coverage: none
@@ -90,7 +91,7 @@ jobs:
       # Checked out ahead of the build so the pre-upload gate below can use the
       # current checker even when the released tag predates it.
       - name: Checkout verification tools
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.sha }}
           path: .release-tools

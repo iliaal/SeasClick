@@ -1,5 +1,5 @@
 --TEST--
-ClickHouse insertFromStream preserves middle blank rows and ignores trailing blank lines
+ClickHouse insertFromStream skips blank lines uniformly
 --EXTENSIONS--
 clickhouse
 --SKIPIF--
@@ -41,8 +41,7 @@ $c->execute("DROP TABLE test.blank_rows");
 $c->execute("DROP TABLE test.blank_rows_2");
 ?>
 --EXPECT--
-rows=3
+rows=2
 row 'alpha' len=5
-row '' len=0
 row 'beta' len=4
-blank two-col: REJECTED
+blank two-col: NO THROW

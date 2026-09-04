@@ -9,9 +9,9 @@
 #   - tests/_clickhouse.inc: seasclick_test_config / seasclick_skip_if_no_server
 #     back-compat function aliases
 #   - tests/026.phpt: exercises the SeasClick / SeasClickException
-#     BC aliases on purpose
+#     BC aliases on purpose (title, construction, and catch lines only)
 #   - tests/051.phpt: server-free surface smoke; verifies the legacy
-#     class-alias names resolve as part of the public surface check
+#     class-alias names resolve (surface-table and expectation lines only)
 #   - bench/bench_mark.php: file-header attribution
 #   - composer.json: "Original author of SeasClick" credit string
 #   - documentation files (README, CHANGELOG, CONTRIBUTING, SECURITY,
@@ -59,8 +59,8 @@ UNEXPECTED=$(printf '%s\n' "${RAW_MATCHES}" |
 	grep -vE '^php_clickhouse\.h:.*(Original SeasClick|RES_NAME_LEGACY|EXCEPTION_NAME_LEGACY|aliases for the original SeasClick)' |
 	grep -vE '^clickhouse\.cpp:.*(Original SeasClick|aliases for the original SeasClick)' |
 	grep -vE '^tests/_clickhouse\.inc:.*(seasclick_test_config|seasclick_skip_if_no_server)' |
-	grep -vE '^tests/026\.phpt:' |
-	grep -vE '^tests/051\.phpt:' |
+	grep -vE '^tests/026\.phpt:.*(BC aliases|new SeasClick|catch \(SeasClickException)' |
+	grep -vE '^tests/051\.phpt:.*(SeasClick", "SeasClickException|class\.SeasClick(Exception)?=)' |
 	grep -vE '^bench/bench_mark\.php:.*for SeasClick\.' |
 	grep -vE '^\.github/workflows/tests\.yml:.*scripts/check-no-seasclick\.sh' |
 	grep -vE '^composer\.json:.*(SeasX Group \(original SeasClick\)|Original author of SeasClick)' ||

@@ -17,6 +17,7 @@ jobs:
   validate:
     name: Validate metadata and generated files
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -36,6 +37,7 @@ jobs:
   pie-smoke:
     name: PIE install smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: validate
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -52,16 +54,25 @@ jobs:
           sudo apt-get install -y --no-install-recommends bison libtool-bin
       - name: Download PIE
         run: |
-          curl -fsSL -o /tmp/pie.phar https://github.com/php/pie/releases/latest/download/pie.phar
+          # Pinned to pie 1.4.10. Update procedure: pick the new tag from
+          # https://github.com/php/pie/releases, download that tag's pie.phar,
+          # refresh the sha256 below, and sanity-check with `php pie.phar --version`.
+          curl -fsSL -o /tmp/pie.phar https://github.com/php/pie/releases/download/1.4.10/pie.phar
+          echo "b88792235c8e80be568436d4cb043b49fd1869c89b64e83d23e2882ae19d70a8  /tmp/pie.phar" | sha256sum -c -
           chmod +x /tmp/pie.phar
       - name: PIE build smoke (base, no TLS)
         run: |
           php /tmp/pie.phar repository:add path .
           php /tmp/pie.phar build iliaal/php_clickhouse:*@dev
+          so=$(find "$PWD" /tmp "$RUNNER_TEMP" -name clickhouse.so -print -quit 2>/dev/null || true)
+          if [ -z "$so" ]; then echo "::error::PIE build produced no clickhouse.so"; exit 1; fi
+          php -n -d extension="$so" -r 'exit(extension_loaded("clickhouse") && class_exists("ClickHouse") ? 0 : 1);'
 
   linux:
     name: PHP ${{ matrix.php }} - Linux
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: validate
     services:
       clickhouse:
         image: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
@@ -226,19 +237,20 @@ jobs:
           export CLICKHOUSE_TLS_WRONG_CA_FILE="$RUNNER_TEMP/ch-certs/wrong.crt"
           # run-tests.php exits 0 on all-skip, so a skipped 027 (no TLS server /
           # no TLS build) would pass this step silently. Capture the summary and
-          # require both tests actually ran and passed.
+          # require all four tests actually ran and passed.
           out=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK \
             tests/027.phpt \
             tests/188.phpt \
-            tests/207_reentrant_ssl_ca_files.phpt 2>&1) || true
+            tests/207_reentrant_ssl_ca_files.phpt \
+            tests/216_ssl_ca_files_invalid_type.phpt 2>&1) || true
           echo "$out"
           skipped=$(echo "$out" | sed -n 's/.*Tests skipped *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           passed=$(echo "$out" | sed -n 's/.*Tests passed *: *\([0-9]\{1,\}\).*/\1/p' | head -1)
           if [ "$skipped" != "0" ]; then
             echo "::error::a TLS test was skipped -- server unreachable or extension built without TLS"; exit 1
           fi
-          if [ "$passed" != "3" ]; then
-            echo "::error::TLS verification suite did not pass all three tests (passed=$passed)"; exit 1
+          if [ "$passed" != "4" ]; then
+            echo "::error::TLS verification suite did not pass all four tests (passed=$passed)"; exit 1
           fi
 
           docker rm -f clickhouse-tls
@@ -246,6 +258,8 @@ jobs:
   linux-zts:
     name: PHP ${{ matrix.php }} ZTS - Linux
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: validate
     services:
       clickhouse:
         image: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
@@ -279,7 +293,24 @@ jobs:
         env:
           PHP_VERSION: ${{ matrix.php }}
         run: |
-          git clone --depth=1 --branch="PHP-${PHP_VERSION}" https://github.com/php/php-src.git /tmp/php-src
+          # Pinned php-src commits (one per branch). Update procedure: run
+          # `git ls-remote https://github.com/php/php-src.git PHP-X.Y` and
+          # refresh the SHA for that branch.
+          case "$PHP_VERSION" in
+            7.4) PHP_SRC_SHA=004cb827501d1ddaf98daacb185a53e0816f78a7 ;;
+            8.0) PHP_SRC_SHA=670052c427eb08a67577789e3b00e56a4fd640a7 ;;
+            8.1) PHP_SRC_SHA=6f82565f12630ba320c52c96e28160189b15ecbf ;;
+            8.2) PHP_SRC_SHA=4fa25b04e76ccafda9a778f2ba2aaeb66fad1037 ;;
+            8.3) PHP_SRC_SHA=7f3d3de1a280f3fb573bd7976185ea94d11be606 ;;
+            8.4) PHP_SRC_SHA=13f5c4bda271d896c6ea4d1b1d2e7dfa046c9694 ;;
+            8.5) PHP_SRC_SHA=dab13a022a54f8bc03302f93ccb6484907ec1245 ;;
+            *) echo "::error::no pinned php-src SHA for PHP $PHP_VERSION"; exit 1 ;;
+          esac
+          rm -rf /tmp/php-src
+          git init -q /tmp/php-src
+          git -C /tmp/php-src remote add origin https://github.com/php/php-src.git
+          git -C /tmp/php-src fetch --depth=1 origin "$PHP_SRC_SHA"
+          git -C /tmp/php-src checkout "$PHP_SRC_SHA"
           cd /tmp/php-src
           ./buildconf --force
           php_extra=()
@@ -339,6 +370,7 @@ jobs:
   windows-matrix:
     name: Resolve Windows matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
@@ -358,8 +390,9 @@ jobs:
 
   windows:
     name: Windows ${{ matrix.php-version }} ${{ matrix.ts }} ${{ matrix.arch }}
-    needs: windows-matrix
+    needs: [windows-matrix, validate]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.windows-matrix.outputs.matrix) }}
@@ -369,6 +402,10 @@ jobs:
           persist-credentials: false
       - name: Build extension
         uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
+        env:
+          # The server suite skips on Windows runners; the guard re-runs this
+          # offline smoke explicitly and fails the lane when it does not pass.
+          REQUIRED_PHPT_TESTS: tests/051.phpt
         with:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
@@ -379,6 +416,8 @@ jobs:
   asan:
     name: PHP ${{ matrix.php }} - ASAN
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: validate
     services:
       clickhouse:
         image: clickhouse/clickhouse-server@sha256:fdc22372465a336fa47e9deab61fad8277b9e2f2473234a1294b33b53f01d377
@@ -429,7 +468,16 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ steps.clang_rt.outputs.dir }}
         run: |
-          git clone --depth=1 --branch="PHP-${PHP_VERSION}" https://github.com/php/php-src.git /tmp/php-src
+          # Pinned php-src commit for the 8.4 branch (this lane builds 8.4
+          # only). Update procedure: run
+          # `git ls-remote https://github.com/php/php-src.git PHP-8.4` and
+          # refresh the SHA below.
+          PHP_SRC_SHA=13f5c4bda271d896c6ea4d1b1d2e7dfa046c9694
+          rm -rf /tmp/php-src
+          git init -q /tmp/php-src
+          git -C /tmp/php-src remote add origin https://github.com/php/php-src.git
+          git -C /tmp/php-src fetch --depth=1 origin "$PHP_SRC_SHA"
+          git -C /tmp/php-src checkout "$PHP_SRC_SHA"
           cd /tmp/php-src
           ./buildconf --force
           # -shared-libasan: link ASan as a shared library so the dynamic

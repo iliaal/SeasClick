@@ -73,3 +73,29 @@ if (!preg_match('/Tests passed\s*:\s*([0-9]+)/', $output, $matches) ||
     fwrite(STDERR, "PHPT guard: the test run reported zero passing tests\n");
     exit(1);
 }
+/* WARNED means a test only passed on retry: not a clean run. run-tests.php
+ * does not fail on it, so fail here. */
+if (preg_match('/Tests warned\s*:\s*([0-9]+)/', $output, $warnedMatches) &&
+    (int)$warnedMatches[1] > 0) {
+    fwrite(STDERR, "PHPT guard: the test run reported warned tests\n");
+    exit(1);
+}
+/* REQUIRED_PHPT_TESTS (space-separated, e.g. "tests/051.phpt"): re-run each
+ * one explicitly and require a pass, so a required offline smoke cannot be
+ * masked by an all-skip summary. Consumed by the Windows lane, where the
+ * server suite skips and 051 is the proof the .dll actually works. */
+$required = trim((string)getenv("REQUIRED_PHPT_TESTS"));
+if ($required !== "") {
+    foreach (preg_split('/\s+/', $required) as $requiredTest) {
+        list($reqStatus, $reqOutput) = runCommand(
+            $base . " " . escapeshellarg($runner) . " " . escapeshellarg($requiredTest)
+        );
+        echo $reqOutput;
+        if ($reqStatus !== 0 ||
+            !preg_match('/Tests passed\s*:\s*([0-9]+)/', $reqOutput, $reqMatches) ||
+            (int)$reqMatches[1] < 1) {
+            fwrite(STDERR, "PHPT guard: required test did not pass: $requiredTest\n");
+            exit(1);
+        }
+    }
+}

@@ -11,8 +11,8 @@ require __DIR__ . "/_clickhouse.inc";
 $ch = new ClickHouse(clickhouse_test_config());
 $ch->execute("CREATE DATABASE IF NOT EXISTS test");
 
-/* An interior blank line in a 2-column TSV must error rather than be
- * silently merged with the following row's leading separator. */
+/* An interior blank line in a 2-column TSV is skipped rather than
+ * merged with the following row's leading separator. */
 $ch->execute("DROP TABLE IF EXISTS test.sfs131a");
 $ch->execute("CREATE TABLE test.sfs131a (a String, b String) ENGINE=Memory");
 $fp = fopen("php://temp", "r+");
@@ -39,7 +39,7 @@ var_dump($ch->select("SELECT s FROM test.sfs131b")[0]["s"]);
 fclose($fp);
 $ch->execute("DROP TABLE test.sfs131b");
 
-/* A blank line cannot stand in for the header of a *WithNames stream. */
+/* A blank line before the header of a *WithNames stream is skipped. */
 $ch->execute("DROP TABLE IF EXISTS test.sfs131c");
 $ch->execute("CREATE TABLE test.sfs131c (a String, b String) ENGINE=Memory");
 $fp = fopen("php://temp", "r+");
@@ -55,6 +55,6 @@ fclose($fp);
 $ch->execute("DROP TABLE test.sfs131c");
 ?>
 --EXPECT--
-blank line: rejected
+blank line: inserted 2 rows
 string(7) "O'Brien"
-leading blank header: rejected
+leading blank header: no throw

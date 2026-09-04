@@ -19,7 +19,10 @@ $c->setVerbose(function ($event, $ctx) use (&$verboseSql) {
 
 $c->select("SELECT {v}", ["v" => "101"]);
 $c->execute("SELECT {v}", ["v" => "202"]);
-$c->selectStream("SELECT {v}", ["v" => "303"]);
+$stream = $c->selectStream("SELECT {v}", ["v" => "303"]);
+// Drain the iterator: an unconsumed stream may never execute, so the log
+// assertion below must observe the query after it has actually run.
+foreach ($stream as $row) {}
 $c->selectStreamCallback("SELECT {v}", function ($row) {}, ["v" => "404"]);
 $out = fopen("php://temp", "w+");
 $c->selectToStream("SELECT {v}", ["v" => "505"], $out);

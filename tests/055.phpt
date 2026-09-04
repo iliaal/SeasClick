@@ -98,7 +98,7 @@ try {
 $col = $c->selectStatement("SELECT id FROM test.stmt_t ORDER BY id")->fetchColumn();
 echo "fetchColumn=", json_encode($col), "\n";
 
-// Constructor is private; new ClickHouseStatement() must throw.
+// Direct construction is rejected; new ClickHouseStatement() must throw.
 try {
     new ClickHouseStatement();
     echo "ctor: NO EXCEPTION (BUG)\n";
@@ -145,7 +145,7 @@ NULL
 fetchKeyPair={"1":"alice","2":"bob","3":"carol"}
 fetchKeyPair rejected: fetchKeyPair requires each row to have at least 2 columns
 fetchColumn=[1,2,3]
-ctor rejected: Error
+ctor rejected: ClickHouseException
 after_unset_count=3
 still_iter=1
 still_iter=2

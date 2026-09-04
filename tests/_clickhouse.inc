@@ -85,7 +85,10 @@ function clickhouse_tls_test_config(): array
     $config = clickhouse_test_config();
     $config["port"] = (int)(getenv("CLICKHOUSE_TLS_PORT") ?: "9440");
     $config["ssl"]  = true;
-    if (getenv("CLICKHOUSE_TLS_SKIP_VERIFY") !== "0") {
+    /* Verify by default. A test opts OUT explicitly with
+     * $config["ssl_skip_verify"] = true; nothing here ever skips
+     * verification on its own. */
+    if (getenv("CLICKHOUSE_TLS_SKIP_VERIFY") === "1") {
         $config["ssl_skip_verify"] = true;
     }
     if ($ca = getenv("CLICKHOUSE_TLS_CA_FILE")) {
@@ -97,6 +100,8 @@ function clickhouse_tls_test_config(): array
 /**
  * Skip a TLS test when either the server isn't reachable on the TLS
  * port or the extension was built without --enable-clickhouse-openssl.
+ * Only connection/handshake failures skip: auth and config errors are
+ * rethrown so a bad fixture fails loudly instead of going green-by-skip.
  */
 function clickhouse_skip_if_no_tls_server(): void
 {
@@ -122,6 +127,17 @@ function clickhouse_skip_if_no_tls_server(): void
         if (strpos($e->getMessage(), "without TLS") !== false) {
             print "skip extension built without TLS support";
             exit;
+        }
+        $message = strtolower($e->getMessage());
+        $transport = false;
+        foreach (array("connect", "refused", "timeout", "handshake", "certificate", "verify", "tls", "ssl", "socket", "network", "unreachable", "reset", "eof", "broken") as $needle) {
+            if (strpos($message, $needle) !== false) {
+                $transport = true;
+                break;
+            }
+        }
+        if (!$transport) {
+            throw $e;
         }
         print "skip TLS handshake failed: " . $e->getMessage();
         exit;

@@ -56,5 +56,4 @@ phpize >/dev/null 2>&1
 make -j"$(nproc)" >/dev/null 2>&1
 echo "build ok"
 TEST_PHP_EXECUTABLE=$(which php) exec php run-tests.php \
-    -d extension=/work/modules/clickhouse.so '"$*"'
-'
+    -d extension=/work/modules/clickhouse.so "$@"' _ "${targets[@]}"

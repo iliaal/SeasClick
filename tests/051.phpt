@@ -27,8 +27,10 @@ echo "JSON_AS_ARRAY=",    ClickHouse::JSON_AS_ARRAY, "\n";
 echo "JSON_AS_OBJECT=",   ClickHouse::JSON_AS_OBJECT, "\n";
 echo "UUID_WITH_DASHES=", ClickHouse::UUID_WITH_DASHES, "\n";
 echo "FIXEDSTRING_BINARY=", ClickHouse::FIXEDSTRING_BINARY, "\n";
+echo "MAP_AS_PAIRS=",    ClickHouse::MAP_AS_PAIRS, "\n";
 
-/* [required, total], matching clickhouse.stub.php. */
+/* [minimum required, minimum total]: new optional params must not break this
+ * smoke, so assert at-least instead of exact equality. */
 $methods = [
     "__construct" => [1, 1], "__destruct" => [0, 0],
     "select" => [1, 5], "selectWithExternalData" => [2, 6],
@@ -58,8 +60,8 @@ foreach ($methods as $m => $arity) {
         continue;
     }
     $rm = new ReflectionMethod("ClickHouse", $m);
-    if ($rm->getNumberOfRequiredParameters() !== $arity[0]
-        || $rm->getNumberOfParameters() !== $arity[1]) {
+    if ($rm->getNumberOfRequiredParameters() < $arity[0]
+        || $rm->getNumberOfParameters() < $arity[1]) {
         $bad_arity[] = $m;
     }
 }
@@ -168,6 +170,7 @@ JSON_AS_ARRAY=16
 JSON_AS_OBJECT=32
 UUID_WITH_DASHES=64
 FIXEDSTRING_BINARY=128
+MAP_AS_PAIRS=256
 missing_methods=none
 bad_arity=none
 iter_missing=none
