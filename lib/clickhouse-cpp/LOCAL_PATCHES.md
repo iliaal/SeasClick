@@ -226,3 +226,31 @@ Patch: `0011-Release-the-peer-certificate-on-a-failed-TLS-verific.patch`.
 Own the certificate in a `unique_ptr<X509, X509_free>` for the lifetime
 of the message build. Exercised by `tests/188.phpt` under the ASAN lane
 once that lane is built with OpenSSL.
+
+## clickhouse/client.cpp: `RetryGuard` and `CreateConnection` rotate only on `std::system_error`
+
+`Client::Impl::ResetConnectionEndpoint()` retries any `clickhouse::Error`
+(patch 0002 above), but the three remaining rotation sites --
+`CreateConnection()` and both `RetryGuard` loops -- catch only
+`std::system_error`. A malformed peer reached mid-session throws
+`ProtocolError` (or `OpenSSLError` on certificate rotation), aborting
+rotation and leaving `current_endpoint_` pointing at the bad peer.
+
+Patch: `0012-Rotate-endpoints-on-Error-in-retry-paths.patch`. Adds a
+`catch (const Error&)` alongside each `catch (const
+std::system_error&)` with the same recovery body. Mid-query server
+exceptions still propagate: the binding's select/execute paths catch
+`ServerException` before any reset runs, so this only affects
+connection-establishment failures.
+
+## clickhouse/client.cpp: destructor teardown keeps a huge positive timeout
+
+Patch 0010 bounds destructor `EndInsert` with a 5s floor when the
+configured recv/send timeout is 0 (infinite), but keeps any positive
+configured timeout as-is -- so `receive_timeout => 3600` still stalls
+`free_obj` / request shutdown for an hour on a dead peer.
+
+Patch: `0013-Cap-teardown-timeouts-at-5s.patch`. Applies
+`min(configured, 5s)` to the teardown recv/send timeouts (plus an
+`<algorithm>` include for `std::min`). The floor still covers the
+infinite case; a positive-but-huge timeout no longer hangs teardown.

@@ -8,6 +8,8 @@
 
 #include "columns/factory.h"
 
+/* std::min for the ~Impl teardown cap (patch 0013). */
+#include <algorithm>
 #include <cassert>
 #include <optional>
 #include <sstream>
@@ -367,19 +369,21 @@ Client::Impl::Impl(const ClientOptions& opts,
 Client::Impl::~Impl() {
     try {
         if (state_ == State::Inserting) {
-            /* free_obj / request shutdown must not hang forever when the
-             * peer is dead and connection_recv_timeout is 0 (infinite).
-             * Apply a hard teardown deadline before EndInsert so SO_RCVTIMEO
-             * / SO_SNDTIMEO make ProcessPacket return. Keep any positive
-             * configured timeout (it may be tighter or looser than 5s). */
+            /* free_obj / request shutdown must not hang on a dead peer when
+             * finishing an abandoned insert. Apply a teardown deadline of
+             * min(configured recv/send timeout, 5s) before EndInsert so
+             * SO_RCVTIMEO / SO_SNDTIMEO make ProcessPacket return: the 5s
+             * floor bounds the infinite (0) case, and the cap keeps a
+             * positive-but-huge configured timeout (e.g. 3600s) from
+             * stalling teardown for an hour. */
             constexpr auto kTeardownMs = std::chrono::milliseconds(5000);
             SocketTimeoutParams tp;
             tp.connect_timeout = options_.connection_connect_timeout;
             tp.recv_timeout = options_.connection_recv_timeout.count() > 0
-                ? options_.connection_recv_timeout
+                ? std::min(options_.connection_recv_timeout, kTeardownMs)
                 : kTeardownMs;
             tp.send_timeout = options_.connection_send_timeout.count() > 0
-                ? options_.connection_send_timeout
+                ? std::min(options_.connection_send_timeout, kTeardownMs)
                 : kTeardownMs;
             if (socket_) {
                 if (auto *s = dynamic_cast<Socket*>(socket_.get())) {
@@ -698,6 +702,14 @@ void Client::Impl::CreateConnection() {
             ResetConnectionEndpoint();
             return;
         } catch (const std::system_error&) {
+            if (++i >= max_attempts)
+            {
+                throw;
+            }
+        } catch (const Error&) {
+            // Same rotation as above: a malformed handshake (ProtocolError)
+            // or a rejected TLS certificate (OpenSSLError) from every
+            // endpoint must exhaust attempts, not abort the first one.
             if (++i >= max_attempts)
             {
                 throw;
@@ -1301,6 +1313,23 @@ void Client::Impl::RetryGuard(std::function<void()> func) {
                 if (!ok && i == options_.send_retries) {
                     break;
                 }
+            } catch (const Error&) {
+                // A malformed peer reached mid-session throws ProtocolError
+                // (or OpenSSLError on cert rotation), not std::system_error.
+                // Recover the same way instead of aborting rotation with
+                // current_endpoint_ stuck on the bad peer.
+                bool ok = true;
+
+                try {
+                    socket_factory_->sleepFor(options_.retry_timeout);
+                    ResetConnection();
+                } catch (...) {
+                    ok = false;
+                }
+
+                if (!ok && i == options_.send_retries) {
+                    break;
+                }
             }
         }
     }
@@ -1317,6 +1346,13 @@ void Client::Impl::RetryGuard(std::function<void()> func) {
             func();
             return;
         } catch (const std::system_error&) {
+            if (++i == connection_attempts_count)
+            {
+                current_endpoint_.reset();
+                throw;
+            }
+        } catch (const Error&) {
+            // Same rotation as above for non-transport Errors.
             if (++i == connection_attempts_count)
             {
                 current_endpoint_.reset();
