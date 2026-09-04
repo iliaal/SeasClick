@@ -26,12 +26,16 @@ $cols = ["i8","u8","i16","u16","i32","u32","i64","u64","f32","f64"];
 
 /* Row A: positional, lower/edge boundaries. UInt64 max exceeds PHP_INT_MAX
  * so it travels as a decimal string; that is the fused UInt64 form. */
+// PHP_INT_MIN/MAX literals only exist on 64-bit PHP; on 32-bit the same
+// int64 edges travel as decimal strings (parsed via strtoll, full range).
+$intMin = PHP_INT_SIZE > 4 ? PHP_INT_MIN : "-9223372036854775808";
+$intMax = PHP_INT_SIZE > 4 ? PHP_INT_MAX : "9223372036854775807";
 $rowA = [-128, 255, -32768, 65535, -2147483648, 4294967295,
-         PHP_INT_MIN, "18446744073709551615", 0.5, 1.25];
+         $intMin, "18446744073709551615", 0.5, 1.25];
 
 /* Row B: associative keys (name-fallback path) + UInt32 hex-string form. */
 $rowB = ["i8"=>127, "u8"=>0, "i16"=>32767, "u16"=>0, "i32"=>2147483647,
-         "u32"=>"0xFFFFFFFF", "i64"=>PHP_INT_MAX, "u64"=>"0", "f32"=>-0.5, "f64"=>-2.5];
+         "u32"=>"0xFFFFFFFF", "i64"=>$intMax, "u64"=>"0", "f32"=>-0.5, "f64"=>-2.5];
 
 $c->insert("test.fused_ins", $cols, [$rowA]);
 
@@ -40,9 +44,18 @@ $byref = [$rowB];
 foreach ($byref as &$r) { foreach ($r as &$cell) { $cell = $cell; } unset($cell); } unset($r);
 $c->insert("test.fused_ins", $cols, $byref);
 
-foreach ($c->select("SELECT * FROM test.fused_ins ORDER BY i8") as $row) {
-    echo json_encode($row), "\n";
+// Normalize ints to their decimal text so the expectation is width-
+// independent; floats stay numeric. Int-vs-string width assertions live
+// in 086/090/208, with u32 probed below.
+$rows = $c->select("SELECT * FROM test.fused_ins ORDER BY i8");
+foreach ($rows as $row) {
+    $norm = [];
+    foreach ($row as $k => $v) { $norm[$k] = is_float($v) ? $v : (string)$v; }
+    echo json_encode($norm), "\n";
 }
+$expectInt = PHP_INT_SIZE > 4;
+var_dump(is_int($rows[0]["u32"]) === $expectInt);
+var_dump(is_int($rows[1]["u32"]) === $expectInt);
 
 /* Range / type rejections still fire through the fused path. */
 probe("i8 over",   fn() => $c->insert("test.fused_ins", ["i8"], [[128]]));
@@ -72,8 +85,10 @@ echo "stream sum=", $c->select("SELECT sum(a) AS a, sum(b) AS b FROM test.fused_
 $c->execute("DROP TABLE test.fused_stream");
 ?>
 --EXPECT--
-{"i8":-128,"u8":255,"i16":-32768,"u16":65535,"i32":-2147483648,"u32":4294967295,"i64":-9223372036854775808,"u64":"18446744073709551615","f32":0.5,"f64":1.25}
-{"i8":127,"u8":0,"i16":32767,"u16":0,"i32":2147483647,"u32":4294967295,"i64":9223372036854775807,"u64":0,"f32":-0.5,"f64":-2.5}
+{"i8":"-128","u8":"255","i16":"-32768","u16":"65535","i32":"-2147483648","u32":"4294967295","i64":"-9223372036854775808","u64":"18446744073709551615","f32":0.5,"f64":1.25}
+{"i8":"127","u8":"0","i16":"32767","u16":"0","i32":"2147483647","u32":"4294967295","i64":"9223372036854775807","u64":"0","f32":-0.5,"f64":-2.5}
+bool(true)
+bool(true)
 i8 over: REJECTED
 i8 under: REJECTED
 u8 over: REJECTED

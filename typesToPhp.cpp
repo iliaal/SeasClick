@@ -50,6 +50,7 @@ extern "C" {
 #include <cstring>  // memchr for the DateTime64 fraction split
 #include <limits>
 #include <system_error>  // inet_ntop failure, mirroring ColumnIPv4/6::AsString
+#include <type_traits>  // is_same_v for the date AppendRaw dispatch
 
 #include "typesToPhp.hpp"
 
@@ -577,10 +578,10 @@ static int parseFixedStringWidth(TypeRef type)
  * the Unix epoch, and the Windows implementation rejects all pre-epoch
  * inputs.
  */
-static std::time_t to_time_t(const char *s, size_t len, bool is_date = true)
+static int64_t to_time_t(const char *s, size_t len, bool is_date = true)
 {
     const char *kind = is_date ? "Date" : "DateTime";
-    auto fail = [&](const char *detail) -> std::time_t {
+    auto fail = [&](const char *detail) -> int64_t {
         throw std::runtime_error(
             std::string("Invalid ") + kind + " string" + detail +
             ": " + std::string(s, len));
@@ -636,18 +637,10 @@ static std::time_t to_time_t(const char *s, size_t len, bool is_date = true)
     unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     int64_t days = era * 146097 + (int64_t)day_of_era - 719468;
     int64_t seconds = days * 86400 + (int64_t)hour * 3600 + (int64_t)minute * 60 + second;
-    bool out_of_range;
-    if constexpr (std::numeric_limits<std::time_t>::is_signed) {
-        out_of_range = seconds < (int64_t)std::numeric_limits<std::time_t>::min() ||
-            seconds > (int64_t)std::numeric_limits<std::time_t>::max();
-    } else {
-        out_of_range = seconds < 0 ||
-            (uint64_t)seconds > (uint64_t)std::numeric_limits<std::time_t>::max();
-    }
-    if (out_of_range) {
-        return fail(" (out of range)");
-    }
-    return (std::time_t)seconds;
+    /* No std::time_t clamp here: on 32-bit platforms time_t is 32 bits and
+     * would reject valid Date32 / DateTime values (pck-time-t-narrowing).
+     * The caller range-checks against the column storage limits. */
+    return seconds;
 }
 
 /*
@@ -657,11 +650,11 @@ static std::time_t to_time_t(const char *s, size_t len, bool is_date = true)
  * path used to_time_t alone, which dropped any sub-second part of the
  * string entirely.
  */
-static std::pair<std::time_t, int64_t> to_time_t_with_frac(const char *s, size_t len, size_t precision)
+static std::pair<int64_t, int64_t> to_time_t_with_frac(const char *s, size_t len, size_t precision)
 {
     const char *dot = (const char *)memchr(s, '.', len);
     size_t whole_len = dot ? (size_t)(dot - s) : len;
-    std::time_t whole = to_time_t(s, whole_len, false);
+    int64_t whole = to_time_t(s, whole_len, false);
     int64_t frac = 0;
     if (dot) {
         std::string input(s, len);
@@ -1063,25 +1056,41 @@ static inline void appendFixedStringCell(ColumnFixedString *value, zval *cell,
 /* Per-cell date/datetime append, shared by appendDateColumn and the fused
  * builder. String cells parse via to_time_t (no user code runs); every
  * other input goes through strict_zval_i64, which throws on objects
- * without invoking __toString -- so this is reentrancy-free. */
+ * without invoking __toString -- so this is reentrancy-free.
+ *
+ * The epoch is carried as int64_t throughout: the vendored
+ * ColumnDate/Date32/DateTime::Append(time_t) narrows on 32-bit platforms
+ * (time_t is 32 bits there), so store via AppendRaw after reducing to the
+ * column storage unit (days for Date/Date32, seconds for DateTime). */
 template <typename TCol>
 static inline void appendDateCell(TCol *value, zval *cell, bool is_date,
                                   const char *type_label,
                                   int64_t min_epoch, int64_t max_epoch)
 {
     ZVAL_DEREF(cell);
-    std::time_t t;
+    int64_t t;
     if (Z_TYPE_P(cell) == IS_STRING) {
-        t = (std::time_t)to_time_t(Z_STRVAL_P(cell), Z_STRLEN_P(cell), is_date);
+        t = to_time_t(Z_STRVAL_P(cell), Z_STRLEN_P(cell), is_date);
     } else {
-        t = (std::time_t)strict_zval_i64(cell, type_label);
+        t = strict_zval_i64(cell, type_label);
     }
-    if ((int64_t)t < min_epoch || (int64_t)t > max_epoch) {
+    if (t < min_epoch || t > max_epoch) {
         throw std::runtime_error(
             std::string(type_label) + " value is outside the representable "
             "range for this column type");
     }
-    value->Append(t);
+    if constexpr (std::is_same_v<TCol, ColumnDate>) {
+        /* uint16 days; min_epoch is 0 so t >= 0 and truncation is exact. */
+        value->AppendRaw((uint16_t)(t / 86400));
+    } else if constexpr (std::is_same_v<TCol, ColumnDate32>) {
+        /* int32 days; floor-divide so pre-epoch seconds land on the right day. */
+        int64_t days = t >= 0 ? t / 86400 : -((-t + 86399) / 86400);
+        value->AppendRaw((int32_t)days);
+    } else {
+        static_assert(std::is_same_v<TCol, ColumnDateTime>,
+            "appendDateCell supports Date, Date32 and DateTime only");
+        value->AppendRaw((uint32_t)t);
+    }
 }
 
 /* Per-cell Time append: int32 seconds, numeric inputs only. Strings are
@@ -1128,7 +1137,7 @@ static inline void appendDateTime64Cell(ColumnDateTime64 *value, zval *cell,
          * (e.g. 2262-04-12 at precision 9) otherwise wraps silently to
          * a 1900-era value. frac is in [0, scale), so a one-tick
          * headroom on the multiply bound covers the add. */
-        int64_t w = (int64_t)whole;
+        int64_t w = whole;
         if (w > (INT64_MAX - frac) / scale || w < INT64_MIN / scale) {
             throw std::runtime_error(
                 "DateTime64 value out of representable range for this precision");
@@ -2820,19 +2829,53 @@ static void emitDoubleCell(zval *arr, double v,
     }
 }
 
-/* Portable reentrant UTC gmtime: POSIX gmtime_r vs MSVC gmtime_s, which
- * reverses the argument order and returns an errno_t. Mirrors the write
- * path's _WIN32 split in to_time_t(). Returns true on success. */
-static bool gmtimeUtc(const std::time_t *t, struct tm *out)
+/* UTC civil-date rendering without libc gmtime: on 32-bit platforms
+ * std::time_t is 32 bits, so routing epoch seconds through gmtime_r
+ * truncates DateTime / Date32 values outside 1901..2038 before rendering
+ * (pck-time-t-narrowing-32bit-6mo). civil_from_days is the inverse of the
+ * days_from_civil arithmetic in to_time_t (Howard Hinnant's algorithm),
+ * making rendering width-independent on every platform. */
+static inline int64_t floor_div_86400(int64_t epoch, int64_t &secs_of_day)
 {
-#ifdef _WIN32
-    return gmtime_s(out, t) == 0;
-#else
-    return gmtime_r(t, out) != nullptr;
-#endif
+    int64_t days = epoch >= 0 ? epoch / 86400 : -((-epoch + 86399) / 86400);
+    secs_of_day = epoch - days * 86400;
+    return days;
 }
 
-// Emit a Unix epoch as either a long or a strftime-formatted string,
+static inline void civil_from_days(int64_t z, int &y, unsigned &m, unsigned &d)
+{
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t y_ = (int64_t)yoe + era * 400;
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp < 10 ? mp + 3 : mp - 9;
+    y = (int)(y_ + (m <= 2 ? 1 : 0));
+}
+
+/* Format a Unix epoch (int64 seconds) as "YYYY-MM-DD" or
+ * "YYYY-MM-DD HH:MM:SS" into buf; returns the length. */
+static inline size_t format_epoch_utc(int64_t epoch, char *buf, size_t bufsz, bool with_time)
+{
+    int64_t secs_of_day = 0;
+    int64_t days = floor_div_86400(epoch, secs_of_day);
+    int y = 0;
+    unsigned m = 0, d = 0;
+    civil_from_days(days, y, m, d);
+    if (!with_time) {
+        return (size_t)snprintf(buf, bufsz, "%04d-%02u-%02u", y, m, d);
+    }
+    unsigned hh = (unsigned)(secs_of_day / 3600);
+    unsigned mm = (unsigned)((secs_of_day / 60) % 60);
+    unsigned ss = (unsigned)(secs_of_day % 60);
+    return (size_t)snprintf(buf, bufsz, "%04d-%02u-%02u %02u:%02u:%02u",
+                            y, m, d, hh, mm, ss);
+}
+
+// Emit a Unix epoch as either a long or a civil-formatted string,
 // dispatched on fetch_mode and is_array. Used by DateTime, Date, and
 // Date32 reads which all share the same shape modulo the format string.
 //
@@ -2840,19 +2883,21 @@ static bool gmtimeUtc(const std::time_t *t, struct tm *out)
 // DateTime is uint32) or treat them as valid pre-epoch dates (Date32);
 // `t == 0` is 1970-01-01, a valid value. We don't emit NULL for any
 // non-NULL server value here.
-static void emitEpoch(zval *arr, std::time_t t, const char *fmt,
+//
+// t is int64_t end to end: the vendored At() returns std::time_t, which
+// narrows on 32-bit platforms, so callers pass RawAt() storage widened
+// here. Integers above ZEND_LONG_MAX surface as decimal strings via
+// emitSigned64Cell (e.g. DateTime 2106-02-07 on 32-bit PHP).
+static void emitEpoch(zval *arr, int64_t t, const char *fmt,
                       const string& column_name, int8_t is_array, long fetch_mode)
 {
     if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
         char buffer[32];
-        struct tm tmv;
-        if (!gmtimeUtc(&t, &tmv)) {
-            throw std::runtime_error("gmtime failed for date/time value");
-        }
-        size_t l = strftime(buffer, sizeof(buffer), fmt, &tmv);
+        bool with_time = strchr(fmt, 'H') != nullptr;
+        size_t l = format_epoch_utc(t, buffer, sizeof(buffer), with_time);
         emitStringCell(arr, buffer, l, column_name, is_array, fetch_mode);
     } else {
-        emitSigned64Cell(arr, (int64_t)t, column_name, is_array, fetch_mode);
+        emitSigned64Cell(arr, t, column_name, is_array, fetch_mode);
     }
 }
 
@@ -3207,7 +3252,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::DateTime:
     {
         auto col = as_or_throw<ColumnDateTime>(columnRef, "DateTime read");
-        emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d %H:%M:%S",
+        emitEpoch(arr, (int64_t)col->RawAt(row), "%Y-%m-%d %H:%M:%S",
                   column_name, is_array, fetch_mode);
         break;
     }
@@ -3224,15 +3269,9 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         int64_t whole_i = raw / scale;
         int64_t frac = raw % scale;
         if (frac < 0) { frac += scale; --whole_i; }
-        std::time_t whole = (std::time_t)whole_i;
-
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
             char buffer[64];
-            struct tm tmv;
-            if (!gmtimeUtc(&whole, &tmv)) {
-                throw std::runtime_error("gmtime failed for DateTime64 value");
-            }
-            size_t l = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tmv);
+            size_t l = format_epoch_utc(whole_i, buffer, sizeof(buffer), true);
             if (precision > 0 && l < sizeof(buffer)) {
                 int written = snprintf(buffer + l, sizeof(buffer) - l, ".%0*lld",
                                        (int)precision, (long long)frac);
@@ -3249,14 +3288,14 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Date:
     {
         auto col = as_or_throw<ColumnDate>(columnRef, "Date read");
-        emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
+        emitEpoch(arr, (int64_t)col->RawAt(row) * 86400, "%Y-%m-%d",
                   column_name, is_array, fetch_mode);
         break;
     }
     case Type::Code::Date32:
     {
         auto col = as_or_throw<ColumnDate32>(columnRef, "Date32 read");
-        emitEpoch(arr, (std::time_t)col->At(row), "%Y-%m-%d",
+        emitEpoch(arr, (int64_t)col->RawAt(row) * 86400, "%Y-%m-%d",
                   column_name, is_array, fetch_mode);
         break;
     }

@@ -30,8 +30,12 @@ $c->execute("INSERT INTO test.u64_map VALUES (map(toUInt64(18446744073709551615)
 
 $rows = $c->select("SELECT u FROM test.u64_scalar ORDER BY u DESC");
 echo "max:      ", var_export($rows[0]['u'], true), "\n";
-echo "midpoint: ", var_export($rows[1]['u'], true), "\n";
+// 2^63-1 is a PHP int only where it fits zend_long; on 32-bit PHP the
+// documented wide-value form is a decimal string (same idiom as 208).
+echo "midpoint: ", (string)$rows[1]['u'], "\n";
 echo "zero:     ", var_export($rows[2]['u'], true), "\n";
+$expectInt = PHP_INT_SIZE > 4;
+var_dump(is_int($rows[1]['u']) === $expectInt);
 
 $rows = $c->select("SELECT m FROM test.u64_map");
 $key = array_keys($rows[0]['m'])[0];
@@ -45,5 +49,6 @@ foreach (["u64_scalar","u64_map"] as $t) $c->execute("DROP TABLE test.$t");
 max:      '18446744073709551615'
 midpoint: 9223372036854775807
 zero:     0
+bool(true)
 map key:   '18446744073709551615'
 map value: '18446744073709551614'

@@ -22,15 +22,19 @@ foreach (["u64s", "u64m"] as $t) $c->execute("DROP TABLE IF EXISTS test.$t");
 $c->execute("CREATE TABLE test.u64s (u UInt64) ENGINE=Memory");
 $c->execute("CREATE TABLE test.u64m (m Map(String, UInt64)) ENGINE=Memory");
 
-// Scalar UInt64: long, decimal string, hex string, all upper-half.
+// ZEND_LONG_MAX as a PHP int literal only exists on 64-bit PHP; on 32-bit
+// the same value travels as a decimal string (the documented wide form).
+$i63 = PHP_INT_SIZE > 4 ? 9223372036854775807 : "9223372036854775807";
 $c->insert("test.u64s", ["u"], [
-    [9223372036854775807],            // ZEND_LONG_MAX as long
+    [$i63],                            // ZEND_LONG_MAX (int or decimal string)
     ["18446744073709551615"],         // 2^64-1 as decimal string
     ["0xFFFFFFFFFFFFFFFE"],           // 2^64-2 as hex
     [0],
 ]);
 $rows = $c->select("SELECT u FROM test.u64s ORDER BY u DESC");
-foreach ($rows as $r) echo "scalar: ", var_export($r['u'], true), "\n";
+foreach ($rows as $r) echo "scalar: ", (string)$r['u'], "\n";
+$expectInt = PHP_INT_SIZE > 4;
+var_dump(is_int($rows[2]['u']) === $expectInt);
 
 // Bad scalar inputs still reject.
 $bad = [
@@ -49,14 +53,15 @@ foreach ($bad as $label => $vals) {
 
 // Map(String, UInt64): values as long, decimal string, hex string.
 $c->insert("test.u64m", ["m"], [[[
-    "a" => 9223372036854775807,
+    "a" => $i63,
     "b" => "18446744073709551615",
     "c" => "0xFFFFFFFFFFFFFFFE",
     "d" => 0,
 ]]]);
 $row = $c->select("SELECT m FROM test.u64m")[0];
 ksort($row['m']);
-foreach ($row['m'] as $k => $v) echo "map[$k]: ", var_export($v, true), "\n";
+foreach ($row['m'] as $k => $v) echo "map[$k]: ", (string)$v, "\n";
+var_dump(is_int($row['m']['a']) === $expectInt);
 
 // Map bad inputs still reject.
 try { $c->insert("test.u64m", ["m"], [[["x" => -1]]]); echo "map negative: NO THROW\n"; }
@@ -67,10 +72,11 @@ catch (ClickHouseException $e) { echo "map junk: REJECTED\n"; }
 foreach (["u64s", "u64m"] as $t) $c->execute("DROP TABLE test.$t");
 ?>
 --EXPECT--
-scalar: '18446744073709551615'
-scalar: '18446744073709551614'
+scalar: 18446744073709551615
+scalar: 18446744073709551614
 scalar: 9223372036854775807
 scalar: 0
+bool(true)
 scalar bad negative long: REJECTED
 scalar bad negative decimal: REJECTED
 scalar bad decimal w/ junk: REJECTED
@@ -79,8 +85,9 @@ scalar bad empty string: REJECTED
 scalar bad fractional double: REJECTED
 scalar bad out-of-range dec: REJECTED
 map[a]: 9223372036854775807
-map[b]: '18446744073709551615'
-map[c]: '18446744073709551614'
+map[b]: 18446744073709551615
+map[c]: 18446744073709551614
 map[d]: 0
+bool(true)
 map negative: REJECTED
 map junk: REJECTED

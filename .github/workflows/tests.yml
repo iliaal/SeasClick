@@ -403,9 +403,10 @@ jobs:
       - name: Build extension
         uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # 1.8.1
         env:
-          # The server suite skips on Windows runners; the guard re-runs this
-          # offline smoke explicitly and fails the lane when it does not pass.
-          REQUIRED_PHPT_TESTS: tests/051.phpt
+          # 209 is 32-bit-only and needs no server (port-1 refusal proves the
+          # bounds), so the x86 lane executes real 32-bit coverage while x64
+          # lanes keep the 051-only requirement (209 skips by design there).
+          REQUIRED_PHPT_TESTS: ${{ matrix.arch == 'x86' && 'tests/051.phpt tests/209_windows_x86_config_bounds.phpt' || 'tests/051.phpt' }}
         with:
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
