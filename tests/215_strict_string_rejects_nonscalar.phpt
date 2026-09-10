@@ -18,8 +18,6 @@ $c->execute("CREATE TABLE test.strict_str (s String) ENGINE = Memory");
 
 error_reporting(E_ALL);
 
-// An array cell used to land as the literal string "Array" after an
-// E_WARNING; it must throw like every other strict coercion.
 try {
     $c->insert('test.strict_str', ['s'], [[['nested', 'array']]]);
     echo "ARRAY: NO EXCEPTION\n";
@@ -27,7 +25,6 @@ try {
     echo "ARRAY THROWS: ", strpos($e->getMessage(), "array cannot be assigned") !== false ? "clean" : $e->getMessage(), "\n";
 }
 
-// A resource cell used to land as "Resource id #N".
 $r = fopen('php://memory', 'rb');
 try {
     $c->insert('test.strict_str', ['s'], [[$r]]);
@@ -37,15 +34,12 @@ try {
 }
 fclose($r);
 
-// Stringable objects remain accepted (intentional support).
 $obj = new _StrictStrBox();
 $c->insert('test.strict_str', ['s'], [[$obj]]);
 var_dump($c->select("SELECT s FROM test.strict_str"));
 
 $c->execute("DROP TABLE test.strict_str");
 
-// FixedString and IPv4 share the strict string path: array/resource cells
-// throw instead of landing as "Array" / "Resource id #N".
 $c->execute("DROP TABLE IF EXISTS test.strict_other");
 $c->execute("CREATE TABLE test.strict_other (f FixedString(8), ip IPv4, m Map(String, String)) ENGINE = Memory");
 
@@ -70,8 +64,6 @@ foreach (["f", "ip"] as $col) {
     fclose($r2);
 }
 
-// Map(String, String) values share it too: a nested array or a resource as
-// the map value throws instead of coercing.
 $r = fopen("php://memory", "rb");
 foreach ([["k" => ["nested"]], ["k" => $r]] as $i => $cell) {
     try {

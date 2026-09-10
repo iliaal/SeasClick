@@ -8,10 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// The iterator methods have zero-arg arginfo but did not call
-// zend_parse_parameters_none(), so a surplus argument was silently ignored
-// (and fatally "Arginfo / zpp mismatch" on a debug build). They now reject
-// extra arguments with an ArgumentCountError.
 
 $c = new ClickHouse(clickhouse_test_config());
 $it = $c->selectStream("SELECT number AS n FROM numbers(3)");
@@ -31,7 +27,6 @@ foreach ($methods as $m) {
     echo "$m: ", ($rejected ? "rejected surplus arg" : "accepted surplus arg"), "\n";
 }
 
-// Normal zero-arg iteration still works.
 $sum = 0;
 foreach ($it as $row) { $sum += $row['n']; }
 echo "sum: $sum\n";

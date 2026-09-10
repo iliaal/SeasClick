@@ -11,12 +11,7 @@ require __DIR__ . "/_clickhouse.inc";
 $ch = new ClickHouse(clickhouse_test_config());
 $ch->enableLogQueries(true);
 
-/* ClickHouse 26.x appends a lowercase "while executing 'FUNCTION ...'"
- * fragment that echoes the call's literal arguments (here the message
- * literal, in real cases a bound value). A case-sensitive marker scan
- * missed the lowercase form and left the fragment — and any literal in
- * it — in the message and the query log. The literal must appear exactly
- * once (the genuine error text), not a second time echoed in the fragment. */
+/* Lowercase execution markers must not echo the secret a second time. */
 try {
     $ch->execute("SELECT throwIf(1, 'SENTINEL_LITERAL')");
     echo "no exception\n";

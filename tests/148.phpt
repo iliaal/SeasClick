@@ -24,7 +24,6 @@ foreach ($c->select("SELECT id, a FROM test.atup_t ORDER BY id") as $r) {
     echo $r["id"], " [", implode(",", $parts), "]\n";
 }
 
-// A plain Array(Int32) still round-trips after the shared Array write path changed.
 $c->execute("DROP TABLE IF EXISTS test.aint_t");
 $c->execute("CREATE TABLE test.aint_t (id UInt32, a Array(Int32)) ENGINE = Memory");
 $c->insert("test.aint_t", ["id", "a"], [[1, [1, 2, 3]], [2, []]]);

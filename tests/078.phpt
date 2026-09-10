@@ -8,12 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for FR-002: CR-003 routed top-level scalar Int*/UInt*/
-// Float* through strict_zval_long / strict_zval_double, but Map values,
-// non-string Int128/UInt128 cells, and geo Point coordinates kept the
-// permissive zval_get_long / zval_get_double path. Same data-corruption
-// class: "abc" → 0, [] → 1, NaN → 0, etc. The strict helpers now flow
-// through every numeric extractor.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -54,7 +48,6 @@ foreach ($probes as $label => $fn) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: well-formed Map / Point / Int128 / UInt128 still land.
 $c->insert("test.fr2_map", ["mi","mu","mf"],
     [[["a"=>-1, "b"=>2], ["a"=>0, "b"=>255], ["a"=>1.5, "b"=>2.5]]]);
 $c->insert("test.fr2_pt",   ["p"],   [[[1.5, 2.5]]]);

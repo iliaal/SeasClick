@@ -1,11 +1,4 @@
 <?php
-/**
- * Shared helpers for php_clickhouse phpt tests.
- *
- * Read connection settings from the environment so tests work both in
- * a docker-compose layout (host=clickhouse) and against a local
- * server started via the README's docker run snippet.
- */
 
 function clickhouse_test_config(): array
 {
@@ -85,9 +78,7 @@ function clickhouse_tls_test_config(): array
     $config = clickhouse_test_config();
     $config["port"] = (int)(getenv("CLICKHOUSE_TLS_PORT") ?: "9440");
     $config["ssl"]  = true;
-    /* Verify by default. A test opts OUT explicitly with
-     * $config["ssl_skip_verify"] = true; nothing here ever skips
-     * verification on its own. */
+    /* Tests must opt out of TLS verification explicitly. */
     if (getenv("CLICKHOUSE_TLS_SKIP_VERIFY") === "1") {
         $config["ssl_skip_verify"] = true;
     }

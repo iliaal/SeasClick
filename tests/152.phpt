@@ -32,8 +32,6 @@ function probe_client(string $label, callable $fn, string $needle): void {
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 
-/* UUID read formatting: raw hex by default, dashed canonical with the flag,
- * for both standalone columns and Map keys/values. */
 $c->execute("DROP TABLE IF EXISTS test.uuid_fmt");
 $c->execute("CREATE TABLE test.uuid_fmt (
     u UUID,
@@ -56,7 +54,6 @@ echo "map val plain:     ", $plain["mv"]["k"], "\n";
 echo "map val dashed:    ", $dashed["mv"]["k"], "\n";
 $c->execute("DROP TABLE test.uuid_fmt");
 
-/* Insert range / type checks. */
 $c->execute("DROP TABLE IF EXISTS test.ranges");
 $c->execute("CREATE TABLE test.ranges (
     t Time,

@@ -20,12 +20,7 @@ require __DIR__ . "/_clickhouse.inc";
 
 $base = clickhouse_test_config();
 
-/* endpoints points at a closed port; the top-level port is the real one,
- * and host is left unset. Pre-fix, clickhouse-cpp prepended the property
- * default host (127.0.0.1) + top-level port as a phantom first endpoint,
- * so the client silently connected to the real server despite the
- * endpoints list naming only a dead port. With host cleared, the
- * endpoints list is authoritative and the connect must fail. */
+/* Only the implicit localhost plus top-level port can connect; explicit endpoints are dead. */
 $cfg = [
     "port"          => $base["port"],                       // real port
     "endpoints"     => [["host" => "127.0.0.1", "port" => 1]], // closed

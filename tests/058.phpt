@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-016 + CR-002: the client-side {name} placeholder
-// validator previously accepted `*`, `(`, `)`, `+` (CR-016) and then
-// `-` (CR-002), which let `tbl --` start a SQL line comment that
-// commented out the trailing predicate. The whitelist is now
-// letters/digits/_/./,/whitespace.
 
 $c = new ClickHouse(clickhouse_test_config());
 

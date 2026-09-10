@@ -13,7 +13,6 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.from_stream");
 $c->execute("CREATE TABLE test.from_stream (id UInt32, name String, score Float64) ENGINE=Memory");
 
-// 1. Bare TabSeparated.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\talice\t1.5\n2\tbob\t2.25\n3\tcarol\t3.75\n");
 rewind($mem);
@@ -25,7 +24,6 @@ foreach ($c->select("SELECT id, name, score FROM test.from_stream ORDER BY id") 
     echo "row: {$r['id']} {$r['name']} {$r['score']}\n";
 }
 
-// 2. TSVWithNames — header row gets skipped.
 $c->execute("TRUNCATE TABLE test.from_stream");
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "id\tname\tscore\n10\tdave\t9.0\n20\teve\t8.5\n");
@@ -38,7 +36,6 @@ foreach ($c->select("SELECT id FROM test.from_stream ORDER BY id") as $r) {
     echo "wn: {$r['id']}\n";
 }
 
-// 3. TSV escapes round-trip through the parser.
 $c->execute("TRUNCATE TABLE test.from_stream");
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\ta\\tb\t1.0\n2\tback\\\\slash\t2.0\n3\tline\\nbreak\t3.0\n");

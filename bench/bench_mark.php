@@ -83,9 +83,7 @@ foreach ($testDataSet as $scenarioIndex => $scenario) {
             $clients[$name]['reset']();
             $expected = count($warmupData);
             $clients[$name]['run']($warmupData, 1, min(50, $expected));
-            /* Untimed correctness gate: a client whose select silently
-             * returned nothing would otherwise be timed and published as if
-             * it had done the same work. */
+            /* Exclude incomplete work from timing comparisons. */
             $seen = $clients[$name]['count']();
             if ($seen !== $expected) {
                 fprintf(
@@ -287,9 +285,7 @@ function makeHttpAdapter($client, $table, array $columns)
 
 function initData($count)
 {
-    /* Identical rows compress to almost nothing, which flatters the LZ4 and
-     * ZSTD columns against an uncompressed HTTP client. Vary every field that
-     * carries real entropy in a production table. */
+    /* Repeated identical rows would unfairly favor compressed clients. */
     $rows = [];
     $timestamp = time();
     /* Knuth multiplicative hash, so the string column varies without

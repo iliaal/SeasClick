@@ -8,10 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// ColumnDecimal::Append(string) scales the text into the backing int with no
-// precision/scale check, so a native block insert used to silently store an
-// out-of-range value (Decimal(5,2) accepting 1000.00, truncating 12.999 to
-// 12.99). The boundary now validates the plain-decimal form.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -28,10 +24,8 @@ function try_insert($c, $label, $type, $val) {
     }
 }
 
-// over precision (integer part too big) and over scale (extra fractional digits)
 try_insert($c, "Dec(5,2) 1000.00", "Decimal(5,2)", "1000.00");
 try_insert($c, "Dec(5,2) 12.999",  "Decimal(5,2)", "12.999");
-// in-range values still work at the boundary
 try_insert($c, "Dec(5,2) 999.99",  "Decimal(5,2)", "999.99");
 try_insert($c, "Dec(5,2) -999.99", "Decimal(5,2)", "-999.99");
 try_insert($c, "Dec(5,2) 0.5",     "Decimal(5,2)", "0.5");

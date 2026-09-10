@@ -8,13 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-9-followup CR-002: strict_zval_long /
-// strict_zval_double historically returned 0 / 0.0 for IS_NULL, so a
-// PHP `null` silently landed as 0 (Int32), 0.0 (Float64), epoch (Date),
-// or midnight (Time) in NON-NULLABLE columns. The strict helpers now
-// reject NULL by default; the Nullable insert path bumps a thread-local
-// guard so its recursive child build accepts NULL → typed-zero
-// placeholder while the null mask captures the actual NULL.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -36,7 +29,6 @@ foreach ($probes as $label => [$cols, $vals]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: Nullable variants still accept NULL via the AllowNullGuard path.
 $c->execute("DROP TABLE IF EXISTS test.nn_ok");
 $c->execute("CREATE TABLE test.nn_ok (
     i Nullable(Int32), f Nullable(Float64), d Nullable(Date)

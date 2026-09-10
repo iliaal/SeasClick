@@ -26,7 +26,6 @@ try {
     echo "client clone rejected: ", get_class($e), "\n";
 }
 
-/* The originals stay fully usable after the rejected clones. */
 $n = 0;
 foreach ($it as $row) {
     $n++;

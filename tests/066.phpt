@@ -8,15 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-501: every PHP_METHOD whose stub declares an
-// `array` parameter used Z_PARAM_ZVAL internally, so PHP's stub-type
-// declaration was not enforced at the C boundary. Z_ARRVAL_P on a
-// non-array zval crashed the worker (debug build assertion / release
-// build SEGV) before any user-catchable exception could fire.
-// Switched to Z_PARAM_ARRAY at every site so the engine raises a
-// clean TypeError before the C body runs.
 
-// Constructor type guard.
 $probes_ctor = [
     "__construct(string)" => fn() => new ClickHouse("not-an-array"),
     "__construct(int)"    => fn() => new ClickHouse(42),

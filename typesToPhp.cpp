@@ -27,7 +27,7 @@ extern "C" {
 #include "zend_smart_str.h"
 #include "zend_exceptions.h"
 #include "php7_wrapper.h"
-#include "main/snprintf.h"  // php_gcvt: locale-independent double formatter for Map float keys (CR-507)
+#include "main/snprintf.h"
 };
 
 #include "php_clickhouse.h"
@@ -42,28 +42,22 @@ extern "C" {
 #include "lib/clickhouse-cpp/clickhouse/columns/ip6.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/lowcardinality.h"
 #include "lib/clickhouse-cpp/clickhouse/columns/map.h"
-#include "lib/clickhouse-cpp/clickhouse/base/socket.h"  // inet_ntop for the IPv4/IPv6 read fast path
+#include "lib/clickhouse-cpp/clickhouse/base/socket.h"
 #include <algorithm>
 #include <cmath>
 #include <cerrno>
 #include <cinttypes>
-#include <cstring>  // memchr for the DateTime64 fraction split
+#include <cstring>
 #include <limits>
-#include <system_error>  // inet_ntop failure, mirroring ColumnIPv4/6::AsString
-#include <type_traits>  // is_same_v for the date AppendRaw dispatch
+#include <system_error>
+#include <type_traits>
 
 #include "typesToPhp.hpp"
 
 using namespace clickhouse;
 using namespace std;
 
-/*
- * Format a 128-bit integer into a decimal string using a stack buffer.
- * Avoids the heap allocation a stringstream incurs per cell on the read
- * paths for Int128 / UInt128 / Decimal columns. Returns the number of
- * bytes written into `out` (which must hold at least 41 bytes: sign +
- * 39 digits + NUL margin).
- */
+/* out needs 41 bytes: sign, 39 digits, and NUL margin. Returns bytes written. */
 static size_t format_uint128_dec(absl::uint128 v, char *out)
 {
     char tmp[40];
@@ -90,22 +84,12 @@ static size_t format_int128_dec(absl::int128 v, char *out)
     return 1 + format_uint128_dec(mag, out + 1);
 }
 
-/*
- * Parse a decimal-digit string into a 128-bit unsigned. Both ColumnInt128
- * and ColumnUInt128 inserts share the body; the signed wrapper composes
- * with negate handled by the caller. Throws on overflow / non-digit.
- *
- * `out_label` is the type name for the error message ("Int128" / "UInt128").
- */
 static absl::uint128 parse_uint128_dec(const char *s, size_t len, const char *out_label)
 {
     if (len == 0 || len > 39) {
         throw std::runtime_error(std::string(out_label) + " string is empty or too long");
     }
-    /* Check overflow BEFORE the multiply. The old post-multiply `next < v`
-     * test misses wraparound: `v * 10` can overflow past 2^128 and still
-     * land above the previous v, so a 39-digit value in [2^128, 10^39)
-     * slipped through wrapped (uint128 max is itself 39 digits). */
+    /* Detect overflow before multiplying: wrapped results can still exceed v. */
     const absl::uint128 umax = ~absl::uint128(0);
     const absl::uint128 umax_div10 = umax / 10;
     const unsigned umax_mod10 = (unsigned)(umax % 10);
@@ -123,14 +107,7 @@ static absl::uint128 parse_uint128_dec(const char *s, size_t len, const char *ou
     return v;
 }
 
-/*
- * dynamic_pointer_cast helper that throws a contextual error when the
- * cast returns null, instead of leaving the caller to deref nullptr.
- * The clickhouse-cpp Block schema metadata is server-supplied; a
- * mismatch between the declared type code and the actual ColumnRef
- * concrete type used to crash the worker. Callers in convertToZval
- * (especially Map / Tuple decoders) wrap every typed cast through here.
- */
+/* Server-supplied type codes may disagree with the concrete column class. */
 template <typename TCol>
 static inline std::shared_ptr<TCol> as_or_throw(const ColumnRef &c, const char *what)
 {
@@ -141,43 +118,20 @@ static inline std::shared_ptr<TCol> as_or_throw(const ColumnRef &c, const char *
     return p;
 }
 
-/*
- * Read-path fast downcast: reinterpret the column as its concrete class
- * via a raw static_cast, skipping the dynamic_pointer_cast that As<>()
- * runs on every cell. Column::As<>() is
- * dynamic_pointer_cast(shared_from_this()) -- an atomic refcount
- * inc/dec plus an RTTI walk -- and a decode-heavy SELECT pays it
- * rows*columns times; a callgrind of a 2-column Int64 read attributed
- * ~18% of decode instructions to that machinery alone.
- *
- * ONLY use this for the structurally-stable scalar column classes whose
- * Type::Code provably identifies the concrete class: the ColumnVector<T>
- * integer/float types (template-keyed one-to-one on the code) and
- * ColumnString. Those mappings are invariant across clickhouse-cpp
- * versions. Do NOT use it for the types whose representation has changed
- * between vendored bumps -- IPv4/IPv6/FixedString reclassification and
- * the geo/Enum/nested wrappers -- where the As<>() null return is a
- * deliberate mismatch guard (see as_or_throw) that has caught real
- * cross-version breakage. Those stay on the checked cast.
- */
+/* Avoid per-cell RTTI/refcount work only for stable, one-to-one Type::Code
+ * mappings: numeric ColumnVector<T> and ColumnString. Representation-changing
+ * types (IP, FixedString, geo, Enum, nested wrappers) need as_or_throw. */
 template <typename TCol>
 static inline const TCol *fast_scalar_col(const ColumnRef &c)
 {
     return static_cast<const TCol *>(c.get());
 }
 
-/*
- * Same contract as as_or_throw, but for the server-supplied type-metadata
- * tree (TypeRef) rather than a column. A crafted/MITM'd server can declare a
- * type code whose concrete Type subclass doesn't match (e.g. a Map code with
- * non-MapType metadata); the create/insert/read paths used to chain
- * ->As<FooType>()->GetX() and deref the null straight into a crash.
- */
+/* Validate concrete metadata types as well as column types. */
 template <typename TType>
 static inline auto type_as_or_throw(const TypeRef &t, const char *what)
 {
-    /* Type::As<>() returns a raw (const TType*), unlike Column::As<>() which
-     * returns a shared_ptr; deduce the return type so both stay correct. */
+    /* Type::As returns a raw pointer; Column::As returns a shared_ptr. */
     auto p = t->As<TType>();
     if (!p) {
         throw std::runtime_error(std::string(what) + ": type metadata mismatch");
@@ -185,23 +139,9 @@ static inline auto type_as_or_throw(const TypeRef &t, const char *what)
     return p;
 }
 
-/*
- * Strict numeric coercion for INSERT cells. PHP's `zval_get_long` and
- * `zval_get_double` happily produce 0 / 0.0 for non-numeric strings,
- * arrays, objects, etc., which used to land "abc" as 0 in an Int32
- * column with no diagnostic. The strict variants below reject every
- * non-numeric input and require full string consumption, mirroring
- * the strict parsers we already use for Map keys (CR-306) and hex
- * literals (CR-508). Range-checking against the destination column's
- * width is still the caller's responsibility (appendIntColumn passes
- * MinV/MaxV, narrow-int Map dispatch wraps with its own checks).
- *
- * IS_NULL handling: rejected by default (storing 0 silently corrupts
- * non-Nullable columns). The Nullable insert path bumps
- * `g_allow_null_in_strict` via AllowNullGuard so its recursive child
- * build can accept NULL cells (the null mask makes the placeholder
- * value irrelevant).
- */
+/* Reject nonnumeric input instead of PHP coercion to zero. Callers enforce
+ * destination widths. AllowNullGuard permits masked NULL placeholders only
+ * while building a Nullable child column. */
 static thread_local int g_allow_null_in_strict = 0;
 struct AllowNullGuard {
     AllowNullGuard()  { ++g_allow_null_in_strict; }
@@ -210,30 +150,11 @@ struct AllowNullGuard {
     AllowNullGuard& operator=(const AllowNullGuard&) = delete;
 };
 
-/* DR-008: g_allow_null_in_strict is thread-local and shared by every
- * ClickHouse client on the thread. It is bumped only transiently inside a
- * Nullable child build, but that build runs userland (__toString /
- * jsonSerialize) which can synchronously reenter a *second* client's
- * insert. Without this, the second insert would observe the first's
- * relaxed strictness and silently coerce a bare NULL to 0/"" on a
- * non-Nullable column. Save-and-restore at each top-level insert
- * entrypoint so a reentrant insert starts from the reject-null default;
- * legitimate same-client nesting is unaffected because the value is
- * restored on scope exit.
- *
- * convert_depth is isolated the same way: a nested type build that
- * reenters userland would otherwise leave the TLS depth elevated for a
- * second client's shallow insert/select and false-trip the 32 limit. */
+/* Userland coercion may reenter another client. Top-level conversion guards
+ * isolate NULL strictness and depth, restoring outer state on exit. */
 static thread_local int convert_depth = 0;
 static const int MAX_CONVERT_DEPTH = 32;
-/* JSON-cap (pck-729): upper bound on a single server-supplied JSON cell
- * handed to php_json_decode on the read path. Decoding amplifies memory
- * (PHP value graph >> wire bytes) and burns CPU in the re2c scanner, so an
- * unbounded cell lets a malicious or degenerate value OOM or stall the
- * worker before the parser-depth bound can matter. Oversize cells still
- * read fine as raw strings (the default mode); only the JSON_AS_ARRAY /
- * JSON_AS_OBJECT decode rejects them. 16 MiB covers document-shaped cells
- * with ample headroom. */
+/* Bound JSON decode amplification; oversized cells remain readable as raw strings. */
 static const size_t MAX_JSON_CELL_BYTES = 16u * 1024u * 1024u;
 
 InsertConversionScopeGuard::InsertConversionScopeGuard()
@@ -304,13 +225,7 @@ static int64_t strict_zval_i64(zval *z, const char *type_label)
     }
 }
 
-/* UInt64 needs a strict parser of its own because signed int64 tops out
- * at 2^63-1: values above that arrive as
- * decimal strings (PHP can't fit them in a zend_long) and must be
- * parsed via strtoull, not strtoll. Same shape as strict_zval_long
- * — full-consumption check, NULL handled under AllowNullGuard,
- * fractional / non-finite doubles rejected — but with the unsigned
- * range and an additional `0x` hex form. */
+/* UInt64 values above INT64_MAX arrive as decimal strings; use unsigned parsing. */
 static uint64_t strict_zval_u64(zval *z, const char *type_label)
 {
     ZVAL_DEREF(z);
@@ -341,9 +256,7 @@ static uint64_t strict_zval_u64(zval *z, const char *type_label)
                 throw std::runtime_error(
                     std::string("fractional double cannot be assigned to integer column ") + type_label);
             }
-            /* 18446744073709551616.0 is exactly 2^64 (uint64_t max is
-             * 2^64-1), so anything >= it overflows uint64_t. Negatives
-             * are rejected explicitly. */
+            /* 2^64 is exactly representable as double, unlike UINT64_MAX. */
             if (d < 0.0 || d >= 18446744073709551616.0) {
                 throw std::runtime_error(
                     std::string("double out of range for integer column ") + type_label);
@@ -428,12 +341,8 @@ static double strict_zval_double(zval *z, const char *type_label)
     }
 }
 
-/* Casting a double outside [INT64_MIN, INT64_MAX] to int64_t is UB
- * (C11 6.3.1.4p1). On x86-64 it silently saturates rather than trapping,
- * and GCC's -fsanitize=undefined does NOT flag it, so guard explicitly.
- * 9223372036854775808.0 is 2^63, the first double above INT64_MAX; any
- * value strictly below it (and >= -2^63) truncates to a valid int64. The
- * negated-range test also rejects a NaN/Inf the multiply might produce. */
+/* Out-of-range double-to-int64 conversion is UB. The exclusive upper
+ * bound is 2^63; the negated range check also rejects NaN/Inf. */
 static int64_t checked_double_to_int64(double v, const char *type_label)
 {
     if (!(v >= -9223372036854775808.0 && v < 9223372036854775808.0)) {
@@ -451,12 +360,6 @@ static std::string strict_zval_string(zval *z, const char *type_label)
         throw std::runtime_error(
             std::string("null cannot be assigned to non-Nullable column ") + type_label);
     }
-    /* Reject non-scalar types explicitly. zval_get_string would coerce an
-     * array to the literal string "Array" (after an E_WARNING) and a
-     * resource to "Resource id #N" -- silent garbage that contradicts the
-     * strict-coercion contract every other column type enforces. Objects
-     * stay accepted: a __toString()-capable value is intentional Stringable
-     * support, and a throwing __toString() surfaces through ZStrGuard. */
     if (Z_TYPE_P(z) == IS_ARRAY) {
         throw std::runtime_error(
             std::string("array cannot be assigned to string column ") + type_label +
@@ -470,10 +373,7 @@ static std::string strict_zval_string(zval *z, const char *type_label)
     return std::string(sg.val(), sg.len());
 }
 
-/* Format a UUID as either 32 raw hex chars (the historical default) or
- * the canonical 8-4-4-4-12 dashed form. Stripping the dashes from the
- * dashed form yields exactly the raw-hex form, so both render the same
- * bytes. Returns the number of chars written (excluding the NUL). */
+/* Return bytes written, excluding NUL; dashed and dashless forms encode identical bytes. */
 static int format_uuid(UUID u, bool dashed, char *buf, size_t bufsz)
 {
     if (dashed) {
@@ -499,10 +399,6 @@ static int uuid_hex_value(char c)
 
 static UUID parseUUIDString(const char *s, size_t len, const char *error_msg)
 {
-    /* DR-010: accept only the two canonical forms -- 32 hex digits (dashless)
-     * or the 8-4-4-4-12 dashed form. The prior parser skipped a '-' at any
-     * position, silently canonicalizing malformed text (e.g. dashes in the
-     * wrong places) instead of rejecting it. */
     bool dashed;
     if (len == 32) {
         dashed = false;
@@ -535,12 +431,6 @@ static UUID parseUUIDString(const char *s, size_t len, const char *error_msg)
     return UUID{high, low};
 }
 
-/*
- * Extract the width from a "FixedString(N)" type name. The previous
- * inline form did `typeName.erase(typeName.find("FixedString("), 12)` —
- * if find() returned npos, erase(npos, 12) is undefined. This helper
- * validates the prefix and parses the digit run.
- */
 static int parseFixedStringWidth(TypeRef type)
 {
     const std::string &name = type->GetName();
@@ -561,23 +451,8 @@ static int parseFixedStringWidth(TypeRef type)
     return (int)w;
 }
 
-/*
- * Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" into a Unix epoch.
- *
- * Fixed-format hand parse straight from the caller's buffer: no
- * std::string temp, no per-cell istringstream + get_time (which built a
- * stream, a locale-backed facet and a sentry per cell on the insert
- * path). The exact-length requirement subsumes the old trailing-garbage
- * peek() check, and the diagnostics below preserve the old messages.
- * Zero-padded components are required, matching what ClickHouse itself
- * accepts; a non-padded input the old get_time leniency took (e.g.
- * "2024-1-2") is now rejected at the boundary.
- *
- * Convert validated civil components directly to UTC epoch seconds.
- * timegm/_mkgmtime use -1 for both failure and the valid second before
- * the Unix epoch, and the Windows implementation rejects all pre-epoch
- * inputs.
- */
+/* Parse zero-padded civil timestamps directly to UTC epoch seconds.
+ * timegm conflates failure with valid epoch -1; Windows rejects pre-epoch input. */
 static int64_t to_time_t(const char *s, size_t len, bool is_date = true)
 {
     const char *kind = is_date ? "Date" : "DateTime";
@@ -606,8 +481,6 @@ static int64_t to_time_t(const char *s, size_t len, bool is_date = true)
         if (len > want && date_shape_at(s) && (is_date || time_shape_at(s + 10))) {
             return fail(" (trailing characters)");
         }
-        /* Reject malformed date/datetime strings instead of silently
-         * coercing to (time_t)-1, which then read back as 1969-12-31. */
         return fail("");
     }
     int64_t year = (int64_t)((s[0] - '0') * 1000 + (s[1] - '0') * 100 +
@@ -637,19 +510,12 @@ static int64_t to_time_t(const char *s, size_t len, bool is_date = true)
     unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     int64_t days = era * 146097 + (int64_t)day_of_era - 719468;
     int64_t seconds = days * 86400 + (int64_t)hour * 3600 + (int64_t)minute * 60 + second;
-    /* No std::time_t clamp here: on 32-bit platforms time_t is 32 bits and
-     * would reject valid Date32 / DateTime values (pck-time-t-narrowing).
-     * The caller range-checks against the column storage limits. */
+    /* Keep int64 epochs: 32-bit time_t would reject valid Date32/DateTime values.
+     * Callers enforce column storage limits. */
     return seconds;
 }
 
-/*
- * Parse "YYYY-MM-DD HH:MM:SS[.ffffff...]" into (whole-seconds, fractional)
- * pair. The fractional component is multiplied by 10^precision so the
- * caller can encode straight into ColumnDateTime64. The previous insert
- * path used to_time_t alone, which dropped any sub-second part of the
- * string entirely.
- */
+/* Return whole seconds and fractional ticks scaled by 10^precision. */
 static std::pair<int64_t, int64_t> to_time_t_with_frac(const char *s, size_t len, size_t precision)
 {
     const char *dot = (const char *)memchr(s, '.', len);
@@ -659,10 +525,6 @@ static std::pair<int64_t, int64_t> to_time_t_with_frac(const char *s, size_t len
     if (dot) {
         std::string input(s, len);
         if (precision == 0) {
-            /* DateTime64(0) has no fractional component; any text after
-             * the dot is invalid. The prior pass silently dropped the
-             * suffix at precision 0, which let "00:00:00.garbage" land
-             * as a clean DateTime64(0). */
             throw std::runtime_error(
                 "Invalid DateTime64(0) string (fractional suffix on a "
                 "zero-precision column): " + input);
@@ -670,8 +532,6 @@ static std::pair<int64_t, int64_t> to_time_t_with_frac(const char *s, size_t len
         const char *p = dot + 1;
         const char *end = s + len;
         if (p >= end) {
-            /* Bare "12:34:56." with no digits after the dot. Previously
-             * accepted (consumed=0 took the no-op path). Reject. */
             throw std::runtime_error(
                 "Invalid DateTime64 string (bare dot without fractional digits): " + input);
         }
@@ -682,16 +542,12 @@ static std::pair<int64_t, int64_t> to_time_t_with_frac(const char *s, size_t len
             ++consumed;
         }
         if (consumed == 0) {
-            /* The first character after the dot wasn't a digit. */
             throw std::runtime_error(
                 "Invalid DateTime64 string (non-digit after dot): " + input);
         }
         // Pad missing digits up to precision so "12:34:56.5" with precision 3
         // contributes 500 (ms), not 5.
         for (size_t pad = consumed; pad < precision; ++pad) frac *= 10;
-        /* Reject trailing non-digit characters after the fractional part.
-         * Without this "2024-01-01 00:00:00.123abc" silently truncated to
-         * .123 and dropped the abc. */
         if (p < end) {
             throw std::runtime_error(
                 "Invalid DateTime64 string (trailing characters after fraction): " + input);
@@ -701,14 +557,7 @@ static std::pair<int64_t, int64_t> to_time_t_with_frac(const char *s, size_t len
 }
 
 
-/* Cap recursion through nested column types (Tuple/Array/Map/Nullable/
- * LowCardinality) so a server-supplied schema like Tuple(Tuple(Tuple(...)))
- * cannot stack-overflow the worker. Used by both the read path
- * (convertToZval) and the write path (createColumn / insertColumn);
- * BeginInsert returns a server-built block schema, so an adversarial or
- * MITM'd server can craft a deeply-nested type just like on the read side.
- *
- * thread_local because clickhouse-cpp may dispatch from worker threads. */
+/* Bound recursion through server-supplied nested types on both read and insert paths. */
 struct ConvertDepthGuard {
     ConvertDepthGuard() {
         if (++convert_depth > MAX_CONVERT_DEPTH) {
@@ -720,9 +569,7 @@ struct ConvertDepthGuard {
 };
 
 
-/* precision is already bounded to 0..9 by callers; 10^9 fits in int64.
- * Table lookup: the loop recomputed the same scale once per cell on the
- * DateTime64/Time64 read paths. */
+/* Callers bound precision to 0..9, so every scale fits int64. */
 static int64_t pow10_i64(size_t precision)
 {
     static constexpr int64_t kPow10[10] = {
@@ -732,12 +579,7 @@ static int64_t pow10_i64(size_t precision)
     return kPow10[precision];
 }
 
-/* Memoize per-column type parameters across cells. Every row of a column
- * shares one Type object, so a single-entry cache keyed on the Type
- * pointer turns the per-cell dynamic cast in the DateTime64 / Time64 /
- * Decimal read arms into a pointer compare. A miss (a new Type object on
- * the next block) re-resolves, so it stays correct; the range guards live
- * on the resolve path with their original messages. */
+/* A column shares one Type object; cache parameters to avoid per-cell casts. */
 struct ColParamMemo {
     const void *type_ptr = nullptr;
     size_t precision = 0;
@@ -776,8 +618,7 @@ static inline size_t cachedTime64Precision(const TypeRef &t)
 static inline size_t cachedDecimalScale(const TypeRef &t)
 {
     if (g_dec_memo.type_ptr != (const void *)t.get()) {
-        /* Unchecked As, as before: a null (non-Decimal metadata under a
-         * Decimal code) reads as scale 0 instead of throwing. */
+        /* Preserve scale 0 for non-Decimal metadata under a Decimal code. */
         auto dt = t->As<DecimalType>();
         size_t s = dt ? dt->GetScale() : 0;
         if (s > 38) {
@@ -815,10 +656,6 @@ static ColumnRef makeLowCardinalityColumn(TypeRef type)
     throw std::runtime_error("LowCardinality only supported over String / FixedString (Nullable allowed)");
 }
 
-/* Map creation matrix: the five vendored key/value instantiations we
- * build natively; anything else falls through to the generic factory
- * (the single documented fallback, shared with createColumn's
- * default arm below). */
 static ColumnRef makeMapColumn(TypeRef type)
 {
     TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
@@ -938,9 +775,6 @@ ColumnRef createColumn(TypeRef type)
 
     case Type::Code::Tuple:
     {
-        /* Build an empty ColumnTuple matching the field types so a Tuple
-         * can serve as the element column of Array(Tuple) on the write
-         * path. The depth guard above bounds recursion. */
         auto tupleType = type_as_or_throw<TupleType>(type, "Tuple")->GetTupleType();
         std::vector<ColumnRef> columns;
         columns.reserve(tupleType.size());
@@ -956,9 +790,6 @@ ColumnRef createColumn(TypeRef type)
     }
 
     default:
-        /* Single documented fallback: any code without a native arm above
-         * (including exotic Map instantiations via makeMapColumn) resolves
-         * through the vendored column factory by type name. */
         return CreateColumnByType(type->GetName());
     }
 }
@@ -981,20 +812,6 @@ static bool canReuseArrayChild(const TypeRef& type)
     }
 }
 
-// Build a column of plain integer cells from a PHP rows array. Used by
-// every signed and unsigned integer type that doesn't accept hex
-// strings (UInt8/16, Int8..Int64).
-//
-// MinV/MaxV bound the destination column's representable range so that an
-// out-of-range PHP value throws instead of silently wrapping in the
-// narrowing assignment to ClickHouse's int8/int16/int32. Values are
-// pulled non-mutatingly via zval_get_long so the caller's row arrays
-// don't get their types coerced in place.
-/* Per-cell appenders. Factored out of the leaf column builders so the
- * transpose path (insertColumn, iterating a column-major PHP array) and
- * the fused path (tryBuildScalarColumnFromRows, pulling a column straight
- * from the row-major input) share one validation + Append implementation
- * and can never drift in bounds checking or coercion rules. */
 template <typename TCol>
 static inline void appendIntCell(TCol *value, zval *cell,
                                  int64_t MinV, int64_t MaxV, const char *type_label)
@@ -1016,11 +833,6 @@ static inline void appendFloatCell(TCol *value, zval *cell, const char *type_lab
     }
     value->Append((typename TCol::ValueType)n);
 }
-/* Per-cell String append, shared by the transpose leaf and the fused
- * builder. The IS_STRING fast path appends a view of the zval buffer
- * straight into the column store (one copy); every other scalar still
- * goes through the strict temp string, which the coercion needs. NULL /
- * array / resource / Stringable handling is identical to strict_zval_string. */
 static inline void appendStringCell(ColumnString *value, zval *cell, const char *type_label)
 {
     ZVAL_DEREF(cell);
@@ -1031,7 +843,6 @@ static inline void appendStringCell(ColumnString *value, zval *cell, const char 
     value->Append(strict_zval_string(cell, type_label));
 }
 
-/* Same shape for FixedString, with the declared-width check on both paths. */
 static inline void appendFixedStringCell(ColumnFixedString *value, zval *cell,
                                          size_t width, const char *type_label)
 {
@@ -1053,15 +864,8 @@ static inline void appendFixedStringCell(ColumnFixedString *value, zval *cell,
     value->Append(s);
 }
 
-/* Per-cell date/datetime append, shared by appendDateColumn and the fused
- * builder. String cells parse via to_time_t (no user code runs); every
- * other input goes through strict_zval_i64, which throws on objects
- * without invoking __toString -- so this is reentrancy-free.
- *
- * The epoch is carried as int64_t throughout: the vendored
- * ColumnDate/Date32/DateTime::Append(time_t) narrows on 32-bit platforms
- * (time_t is 32 bits there), so store via AppendRaw after reducing to the
- * column storage unit (days for Date/Date32, seconds for DateTime). */
+/* AppendRaw avoids narrowing through 32-bit time_t. Convert seconds to
+ * column units first. Neither string parsing nor numeric coercion invokes PHP. */
 template <typename TCol>
 static inline void appendDateCell(TCol *value, zval *cell, bool is_date,
                                   const char *type_label,
@@ -1093,17 +897,10 @@ static inline void appendDateCell(TCol *value, zval *cell, bool is_date,
     }
 }
 
-/* Per-cell Time append: int32 seconds, numeric inputs only. Strings are
- * rejected without coercion, and strict_zval_i64 throws on objects
- * without invoking __toString -- reentrancy-free like appendDateCell. */
 static inline void appendTimeCell(ColumnTime *value, zval *cell)
 {
     ZVAL_DEREF(cell);
-    /* Time is stored as int seconds-since-midnight; accept only
-     * numeric inputs. String inputs would need an "HH:MM:SS"
-     * parser which the column type doesn't currently expose, so
-     * reject strings explicitly instead of letting zval_get_long
-     * coerce "abc" to 0. */
+    /* No time-string parser is available; reject strings rather than coerce them to zero. */
     if (Z_TYPE_P(cell) == IS_STRING) {
         throw std::runtime_error(
             "Time column inserts require numeric seconds; "
@@ -1117,26 +914,14 @@ static inline void appendTimeCell(ColumnTime *value, zval *cell)
     value->Append((int32_t)t);
 }
 
-/* Per-cell DateTime64 append. String cells parse via to_time_t_with_frac
- * and numerics via the strict parsers; no branch invokes user PHP, so
- * this is reentrancy-free. precision/scale are resolved once per column
- * by the caller. */
 static inline void appendDateTime64Cell(ColumnDateTime64 *value, zval *cell,
                                         size_t precision, int64_t scale)
 {
     ZVAL_DEREF(cell);
-    /* Any string is treated as a formatted timestamp; the prior
-     * dash-only gate let "abc" fall through zval_get_long to 0
-     * (epoch). to_time_t_with_frac validates fully. Numeric
-     * inputs go through strict_zval_long / strict_zval_double. */
     if (Z_TYPE_P(cell) == IS_STRING) {
         auto [whole, frac] = to_time_t_with_frac(
             Z_STRVAL_P(cell), Z_STRLEN_P(cell), precision);
-        /* DR-004: guard whole*scale (+frac) against int64 overflow,
-         * matching the integer path below. A far-future timestamp
-         * (e.g. 2262-04-12 at precision 9) otherwise wraps silently to
-         * a 1900-era value. frac is in [0, scale), so a one-tick
-         * headroom on the multiply bound covers the add. */
+        /* frac is in [0, scale); reserve one tick of multiply headroom for the add. */
         int64_t w = whole;
         if (w > (INT64_MAX - frac) / scale || w < INT64_MIN / scale) {
             throw std::runtime_error(
@@ -1144,11 +929,8 @@ static inline void appendDateTime64Cell(ColumnDateTime64 *value, zval *cell,
         }
         value->Append(w * scale + frac);
     } else if (Z_TYPE_P(cell) == IS_DOUBLE) {
-        /* The numeric paths take the value as (fractional) seconds
-         * since the epoch, like DateTime. A double's 52-bit mantissa
-         * can't hold epoch * 10^precision exactly once precision >= 7,
-         * so a float would silently round; require a formatted string
-         * for sub-microsecond precision. */
+        /* Floats lose epoch precision beyond microseconds; require formatted
+         * strings for precision >= 7. */
         if (precision >= 7) {
             throw std::runtime_error(
                 "DateTime64 precision >= 7 cannot be set from a float without "
@@ -1157,8 +939,6 @@ static inline void appendDateTime64Cell(ColumnDateTime64 *value, zval *cell,
         double d = strict_zval_double(cell, "DateTime64");
         value->Append(checked_double_to_int64(d * scale, "DateTime64"));
     } else {
-        /* Integer = whole seconds since the epoch, scaled to ticks.
-         * Guard the multiply against int64 overflow for absurd inputs. */
         int64_t secs = strict_zval_i64(cell, "DateTime64");
         if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
             throw std::runtime_error(
@@ -1168,7 +948,6 @@ static inline void appendDateTime64Cell(ColumnDateTime64 *value, zval *cell,
     }
 }
 
-/* Per-cell Time64 append. Same reentrancy-free shape as DateTime64. */
 static inline void appendTime64Cell(ColumnTime64 *value, zval *cell,
                                     size_t precision, int64_t scale)
 {
@@ -1187,8 +966,6 @@ static inline void appendTime64Cell(ColumnTime64 *value, zval *cell,
         double d = strict_zval_double(cell, "Time64");
         value->Append(checked_double_to_int64(d * scale, "Time64"));
     } else {
-        /* Integer = whole seconds, scaled to ticks; guard the
-         * multiply against int64 overflow. */
         int64_t secs = strict_zval_i64(cell, "Time64");
         if (secs > INT64_MAX / scale || secs < INT64_MIN / scale) {
             throw std::runtime_error(
@@ -1211,12 +988,6 @@ static ColumnRef appendIntColumn(HashTable *values_ht,
     return value;
 }
 
-// Build an unsigned integer column with a hex-string fast path. UInt32
-// and UInt64 both accept "0x..." strings as a way to land values in the
-// upper half of the range that a PHP signed long can't represent.
-// `MaxV` bounds the destination column width: strtoul on 64-bit Linux
-// returns 64-bit values regardless of the target column, so without a
-// width check "0x100000000" silently truncated to UInt32 0.
 template <typename TCol, typename TStrtoul>
 static inline void appendUIntHexCell(TCol *value, zval *array_value,
                                      TStrtoul strtoul_fn, uint64_t MaxV,
@@ -1231,11 +1002,7 @@ static inline void appendUIntHexCell(TCol *value, zval *array_value,
         char *endp = NULL;
         errno = 0;
         auto n = strtoul_fn(s, &endp, 0);
-        /* PHP zend_string is length-prefixed and may carry embedded
-         * NUL bytes. Comparing endp against ZSTR_LEN is the right
-         * "fully consumed" check; checking *endp == '\0' would let
-         * "0xABCD\0garbage" silently parse as 0xABCD because endp
-         * lands on the NUL. Same fix CR-306 applied to Map keys. */
+        /* Check the length, not just NUL termination: PHP strings may contain embedded NULs. */
         if (errno == ERANGE || endp == s ||
             (size_t)(endp - s) != slen) {
             throw std::runtime_error(
@@ -1274,11 +1041,7 @@ static ColumnRef appendUIntColumnWithHex(HashTable *values_ht,
     return value;
 }
 
-// 64-bit twin of appendUIntHexCell. The hex branch is identical (strtoull
-// covers the full 64-bit range); the non-hex branch parses via
-// strict_zval_u64 instead of strict_zval_i64 so decimal strings above
-// ZEND_LONG_MAX land — readers already surface such values as decimal
-// strings, so the writer must accept the same form.
+// Decimal strings above ZEND_LONG_MAX must round-trip from UInt64 reads.
 static inline void appendUInt64HexCell(ColumnUInt64 *value, zval *array_value,
                                       const char *type_label)
 {
@@ -1313,29 +1076,13 @@ static ColumnRef appendUInt64Column(HashTable *values_ht,
     return value;
 }
 
-// Build an Enum8 / Enum16 column from a PHP rows array. Integer cells
-// validate against the type's declared value set; the prior unchecked
-// Append silently stored values like 0 / 3 / 127 inside an
-// `Enum8('One'=1,'Two'=2)` column, after which normal reads threw
-// `map::at` because the read path looks up the name for the stored
-// integer. String cells go through ColumnEnum*::Append(name) which
-// validates internally.
-//
-// IS_NULL handling: rejected for non-Nullable enums (would otherwise
-// store raw 0, which is usually not a declared enum value and poisons
-// reads). The Nullable insert path bumps AllowNullGuard so its
-// recursive child build accepts NULL → declared-value placeholder; the
-// null mask captures the actual NULL.
+// Undeclared enum integers break name lookup on read; validate before Append.
 template <typename TCol, typename TInt>
 static ColumnRef appendEnumColumn(TypeRef type, HashTable *values_ht)
 {
     auto value = std::make_shared<TCol>(type);
     auto enum_type = type->As<clickhouse::EnumType>();
-    /* Choose a placeholder int that's actually declared in the enum so
-     * NULL cells under AllowNullGuard land safely. EnumType exposes
-     * begin()/end() iterators over (name, value) pairs; just take the
-     * first one. enum_type can be null on an unexpected schema; in
-     * that case we conservatively use 0 and let HasEnumValue reject. */
+    /* Masked NULLs still need a declared enum value; HasEnumValue checks the fallback. */
     TInt placeholder = 0;
     if (enum_type) {
         auto it = enum_type->BeginValueToName();
@@ -1362,8 +1109,6 @@ static ColumnRef appendEnumColumn(TypeRef type, HashTable *values_ht)
             }
             value->Append((TInt)narrow);
         } else {
-            /* String path: ColumnEnum*::Append(name) validates internally
-             * and throws on unknown names. */
             ZStrGuard sg(array_value);
             value->Append(std::string(sg.val(), sg.len()));
         }
@@ -1371,10 +1116,6 @@ static ColumnRef appendEnumColumn(TypeRef type, HashTable *values_ht)
     return value;
 }
 
-// Build a ColumnDate / ColumnDate32 / ColumnDateTime column from a PHP
-// rows array. Each row is either an int (epoch seconds) or a "YYYY-MM-DD"
-// (or "YYYY-MM-DD HH:MM:SS" for is_date=false) string. The string path
-// goes through to_time_t which throws on parse failure.
 template <typename TCol>
 static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date,
                                   const char *type_label,
@@ -1383,20 +1124,12 @@ static ColumnRef appendDateColumn(HashTable *values_ht, bool is_date,
     auto value = std::make_shared<TCol>();
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
-        /* Any string is treated as a formatted date/datetime; numerics go
-         * through strict_zval_i64. See appendDateCell for the coercion
-         * rules and the DR-003 range check. */
         appendDateCell(value.get(), array_value, is_date, type_label,
                        min_epoch, max_epoch);
     } ZEND_HASH_FOREACH_END();
     return value;
 }
 
-// Build a LowCardinality(String) / LowCardinality(FixedString) column,
-// optionally wrapped in Nullable. The four code paths used to be
-// near-identical 12-line ZEND_HASH_FOREACH blocks; the template
-// parameterizes on the column type and a compile-time `nullable` flag
-// that decides whether IS_NULL maps to std::nullopt.
 template <typename TCol, bool nullable>
 static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_ptr<TCol> value, const char *type_label)
 {
@@ -1415,7 +1148,6 @@ static ColumnRef appendLowCardinalityColumn(HashTable *values_ht, std::shared_pt
     return value;
 }
 
-// Build a Float32/Float64 column from a PHP rows array.
 template <typename TCol>
 static ColumnRef appendFloatColumn(HashTable *values_ht, const char *type_label)
 {
@@ -1427,17 +1159,12 @@ static ColumnRef appendFloatColumn(HashTable *values_ht, const char *type_label)
     return value;
 }
 
-// Build a ColumnMapT<KCol, VCol> from PHP rows. Each row is an assoc
-// array; the caller supplies extractors that turn (zend_string*, ulong)
-// into K and (zval*) into V.
 template <typename K, typename V, typename KCol, typename VCol,
           typename KFn, typename VFn>
 static ColumnRef appendMapColumn(HashTable *values_ht, KFn extract_key, VFn extract_val)
 {
     auto col = std::make_shared<ColumnMapT<KCol, VCol>>(
         std::make_shared<KCol>(), std::make_shared<VCol>());
-    /* Reuse the entries vector across rows so the per-row push_back
-     * path doesn't fresh-heap-allocate; clear() preserves capacity. */
     std::vector<std::pair<K, V>> entries;
     zval *array_value;
     ZEND_HASH_FOREACH_VAL(values_ht, array_value) {
@@ -1569,8 +1296,6 @@ static ColumnRef appendMapPairsColumn(HashTable *values_ht,
     return std::make_shared<ColumnMap>(rows);
 }
 
-// Parse a PHP zval into a clickhouse UUID. Mirrors the standalone-UUID
-// insert path; used by Map(*, UUID) value extraction.
 static UUID phpToUUID(zval *zv)
 {
     ZVAL_DEREF(zv);
@@ -1584,24 +1309,12 @@ static UUID phpToUUID(zval *zv)
     return parseUUIDString(sg.val(), sg.len(), "UUID format error");
 }
 
-// Second-stage Map dispatch: key column type already resolved at the
-// call site, dispatch on value type code. Kept as a function template so
-// each (KCol, K) tuple instantiates its own value-side switch and the
-// compiler can fold identical extractor lambdas across instantiations.
 template <typename KCol, typename K, typename KFn>
 static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn key_fn)
 {
     auto strVal = [](zval *mv) -> std::string {
         return strict_zval_string(mv, "Map value String");
     };
-    /* Narrow-typed int extractors range-check before truncation. The
-     * non-Map insert path has had these via appendIntColumn since pass 1;
-     * the Map dispatch was using a single i64Val/u64Val for all widths
-     * which silently wrapped Map(K, Int8) value 1000 to int8_t -24. */
-    /* All Map value extractors go through strict_zval_i64 /
-     * strict_zval_double so non-numeric strings, fractional doubles, and
-     * non-finite floats throw instead of silently coercing to 0 / 0.0
-     * inside the Map. Mirrors CR-003 for the non-Map path. */
     auto i64Val = [](zval *mv) -> int64_t {
         return strict_zval_i64(mv, "Map value Int64");
     };
@@ -1684,8 +1397,6 @@ static ColumnRef appendMapByValueType(HashTable *values_ht, TypeRef vtype, KFn k
     }
 }
 
-// Coerce a PHP 2-element numeric array into a (double, double) point tuple.
-// Used by Point/Ring/Polygon/MultiPolygon insert paths.
 static std::tuple<double, double> phpToPoint(zval *zv)
 {
     ZVAL_DEREF(zv);
@@ -1734,15 +1445,7 @@ static std::vector<std::vector<std::tuple<double, double>>> phpToPolygon(zval *z
     return poly;
 }
 
-/* Shared row-cell extraction for the insert paths. Given one row from the
- * row-major $values matrix, return the cell for column col_index: look it
- * up positionally, then fall back to the column name (assoc rows). Rows
- * and cells are dereferenced so a by-ref element surfaces its underlying
- * value; the IS_ARRAY recheck defends against a by-ref row reassigned to a
- * non-array mid-iteration. Both buildSingleColumnZval (transpose path) and
- * tryBuildScalarColumnFromRows (fused path) route through here so the
- * by-ref / arity / name-fallback rules stay identical. Throws on a
- * malformed row or a missing cell. */
+/* Recheck row type: a referenced row can change during userland coercion. */
 zval *extractRowCell(zval *row_pz, size_t col_index,
                      const std::vector<zend_string*> *col_names)
 {
@@ -1764,27 +1467,13 @@ zval *extractRowCell(zval *row_pz, size_t col_index,
     return cell;
 }
 
-/*
- * PERF-004: build a column straight from the row-major input, pulling
- * col_index out of each row without first transposing the column into a
- * temporary PHP array (which the transpose path then walks a second time
- * and destroys). Fused iff the per-cell appender cannot invoke user PHP:
- * the strict numeric coercers, the hand date parsers (to_time_t /
- * to_time_t_with_frac) and the reject-strings Time arms throw on objects
- * without touching __toString, so iterating the live rows HashTable is
- * safe -- no user callback can mutate $rows mid-walk, and no snapshot /
- * addref is needed. String, FixedString, UUID, Decimal, Enum, JSON and
- * all composite types go through ZStrGuard / jsonSerialize, so they stay
- * on the snapshotting transpose path. Returns nullptr for any type not
- * fused here; the caller falls back to buildSingleColumnZval +
- * insertColumn.
- */
+/* Fuse only appenders that cannot invoke PHP; iterating live rows is then safe.
+ * Types using __toString/jsonSerialize need the snapshotting transpose path.
+ * Return nullptr to request that fallback. */
 ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
                                        const std::vector<zend_string*> *col_names,
                                        TypeRef type)
 {
-    /* One iteration + extraction implementation, one per-cell appender per
-     * type -- the same appenders the transpose leaf builders call. */
     auto build = [&](auto column, auto per_cell) -> ColumnRef {
         zval *row_pz;
         ZEND_HASH_FOREACH_VAL(rows_ht, row_pz) {
@@ -1831,13 +1520,8 @@ ColumnRef tryBuildScalarColumnFromRows(HashTable *rows_ht, size_t col_index,
     }
 }
 
-/* DR-002: ColumnDecimal::Append(string) scales the text into the backing
- * int and never checks it against the declared precision/scale, so a native
- * block insert silently stores an out-of-range value (Decimal(5,2) accepting
- * 1000.00, or truncating 12.999 to 12.99) that the server's own VALUES parser
- * would reject. Validate the plain-decimal form here; unusual forms
- * (scientific notation, etc.) fall through to ColumnDecimal, which throws on
- * anything it can't parse. */
+/* ColumnDecimal::Append does not enforce precision/scale; validate plain
+ * decimals here and leave unusual forms to the native parser. */
 static void validateDecimalText(const std::string &s, size_t precision,
                                 size_t scale, const char *label)
 {
@@ -1853,8 +1537,6 @@ static void validateDecimalText(const std::string &s, size_t precision,
         while (i < n && s[i] >= '0' && s[i] <= '9') ++i;
         frac_digits = i - f0;
     }
-    /* Not a plain [sign] digits [. digits] literal (e.g. an exponent form):
-     * leave it to ColumnDecimal to accept or reject. */
     if (i != n || (int_digits == 0 && frac_digits == 0)) return;
 
     size_t sig_int = int_digits;
@@ -1873,10 +1555,6 @@ static void validateDecimalText(const std::string &s, size_t precision,
     }
 }
 
-/* Numeric insert family: every int/uint width plus both float widths.
- * UInt64 routes through appendUInt64Column (hex + strict-u64 parse, so
- * decimal strings above ZEND_LONG_MAX land); the rest share the
- * int/hex/float appenders with the fused-row leaf builders below. */
 static ColumnRef insertNumericColumn(Type::Code code, HashTable *values_ht)
 {
     switch (code) {
@@ -1905,9 +1583,6 @@ static ColumnRef insertNumericColumn(Type::Code code, HashTable *values_ht)
     }
 }
 
-/* Temporal insert family: date / time / datetime widths. The
- * precision-carrying cases (DateTime64, Time64) read the scale from
- * `type`, mirroring the fused-row leaf builders. */
 static ColumnRef insertTemporalColumn(TypeRef type, HashTable *values_ht)
 {
     zval *array_value;
@@ -1919,9 +1594,7 @@ static ColumnRef insertTemporalColumn(TypeRef type, HashTable *values_ht)
     case Type::Code::DateTime64:
     {
         size_t precision = type_as_or_throw<DateTime64Type>(type, "DateTime64")->GetPrecision();
-        /* Bound the server-supplied precision before the scale loop: a
-         * precision >= 19 overflows the signed int64 scale (UB), and the
-         * read path already rejects precision > 9. */
+        /* Bound server precision before scaling to prevent signed overflow. */
         if (precision > 9) {
             throw std::runtime_error("DateTime64 precision out of spec range (0..9)");
         }
@@ -1976,17 +1649,13 @@ static ColumnRef insertTemporalColumn(TypeRef type, HashTable *values_ht)
     }
 }
 
-/* Geo + IP insert family: textual/numeric IPs and the geo shapes. */
 static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
 {
     zval *array_value;
     switch (code) {
     case Type::Code::IPv4:
     {
-        /* ColumnIPv4::Append(string) validates via inet_pton and throws on
-         * an empty string, so the empty-string null placeholder String uses
-         * doesn't work. Under AllowNullGuard (a Nullable(IPv4) build), emit
-         * a valid sentinel the null bitmap masks out. */
+        /* IPv4 rejects the empty-string NULL placeholder; use a valid masked address. */
         auto value = std::make_shared<ColumnIPv4>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -1995,14 +1664,8 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
             if (Z_TYPE_P(v) == IS_NULL && g_allow_null_in_strict > 0) {
                 value->Append(std::string("0.0.0.0"));
             } else if (Z_TYPE_P(v) == IS_LONG || Z_TYPE_P(v) == IS_DOUBLE) {
-                /* Integer input matches ClickHouse's toIPv4(N): the value is
-                 * the IP with the most-significant byte as the first octet
-                 * (16909060 -> 1.2.3.4). Format to dotted-quad and reuse the
-                 * validated string path rather than ColumnIPv4::Append(uint32),
-                 * whose host/network byte-order handling differs. An integral
-                 * float is accepted too (consistent with the integer columns,
-                 * which take int + integral-double); a fractional float is
-                 * rejected. A string is always treated as a textual IP. */
+                /* Match toIPv4(N): 16909060 -> 1.2.3.4. The native uint32 Append
+                 * has different byte-order handling, so use the validated text path. */
                 zend_long n;
                 if (Z_TYPE_P(v) == IS_DOUBLE) {
                     double d = Z_DVAL_P(v), intpart;
@@ -2097,8 +1760,6 @@ static ColumnRef insertGeoIpColumn(Type::Code code, HashTable *values_ht)
     }
 }
 
-/* Map insert family: key-shape classification (assoc vs pairs) then
- * per-key-type dispatch into the appendMapByValueType builders. */
 static ColumnRef insertMapColumn(TypeRef type, HashTable *values_ht)
 {
         TypeRef k = type_as_or_throw<MapType>(type, "Map")->GetKeyType();
@@ -2114,21 +1775,13 @@ static ColumnRef insertMapColumn(TypeRef type, HashTable *values_ht)
             return appendMapPairsColumn(values_ht, k, v);
         }
 
-        // String keys reject integer-keyed PHP entries outright; integer
-        // keys parse the string form or fall back to the numeric key.
-        // Numeric parsers reject anything that doesn't consume the full
-        // string (PHP's strtoll silently returned 0 for "abc" before).
         auto strKey = [](zend_string *zk, zend_ulong) -> std::string {
             if (!zk) {
                 throw std::runtime_error("Map(String, *) row entry must have a string key");
             }
             return std::string(ZSTR_VAL(zk), ZSTR_LEN(zk));
         };
-        /* PHP zend_string is length-prefixed and may contain embedded
-         * NUL bytes. Comparing endp against ZSTR_LEN is the right
-         * "fully consumed" check; checking *endp == '\0' would let
-         * "123\x00garbage" silently parse as 123 because endp would
-         * land on the NUL. */
+        /* Embedded NULs must not truncate a length-prefixed PHP key. */
         auto i64Key = [](zend_string *zk, zend_ulong nk) -> int64_t {
             if (!zk) return (int64_t)(zend_long)nk;
             const char *s = ZSTR_VAL(zk);
@@ -2189,9 +1842,6 @@ static ColumnRef insertMapColumn(TypeRef type, HashTable *values_ht)
             return parseUUIDString(ZSTR_VAL(zk), ZSTR_LEN(zk), "UUID key format error");
         };
 
-        /* Narrow-key wrappers: same range-check the value side gained for
-         * narrow Map columns. Keys arrive as decimal strings; the parsed
-         * int64 must still fit the destination column width. */
         auto narrowKeyI = [&](zend_string *zk, zend_ulong nk,
                               int64_t lo, int64_t hi, const char *t) -> int64_t {
             int64_t parsed = i64Key(zk, nk);
@@ -2271,7 +1921,7 @@ static ColumnRef insertMapColumn(TypeRef type, HashTable *values_ht)
 }
 ColumnRef insertColumn(TypeRef type, zval *value_zval)
 {
-    ConvertDepthGuard depth_guard;  // shared with createColumn / convertToZval
+    ConvertDepthGuard depth_guard;
     zval *array_value;
     HashTable *values_ht = Z_ARRVAL_P(value_zval);
 
@@ -2316,15 +1966,8 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
     case Type::Code::JSON:
     {
-        /* Auto-detect by zval type: a PHP array/object is json_encode'd;
-         * a string is treated as raw JSON text and validated client-side
-         * (a malformed string would otherwise fail mid-stream inside the
-         * server's block parse with an opaque protocol error). A bare
-         * NULL is rejected on a non-Nullable JSON column (storing {} would
-         * silently corrupt); only under AllowNullGuard (a Nullable(JSON)
-         * build) does NULL map to the empty object {} -- the convention
-         * ColumnNullableT<ColumnJSON> uses for null rows, which the null
-         * mask then masks out. */
+        /* Raw JSON strings need validation before wire transmission. Nullable
+         * children use a masked {} placeholder; bare NULL is invalid. */
         auto value = std::make_shared<ColumnJSON>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -2334,11 +1977,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 smart_str buf = {0};
                 if (php_json_encode(&buf, v, 0) == FAILURE || EG(exception)) {
                     smart_str_free(&buf);
-                    /* A user JsonSerializable::jsonSerialize() / __toString()
-                     * may have thrown. Leave EG(exception) set so the boundary
-                     * throwClickHouseError preserves the original type and
-                     * message (as the String path via ZStrGuard already does)
-                     * instead of replacing it with a generic wrapper. */
+                    /* Preserve any PHP exception from jsonSerialize/__toString for the boundary catch. */
                     if (EG(exception)) {
                         throw std::runtime_error(
                             "JSON insert: value serialization threw an exception");
@@ -2349,12 +1988,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 value->Append(std::string_view(ZSTR_VAL(buf.s), ZSTR_LEN(buf.s)));
                 smart_str_free(&buf);
             } else if (Z_TYPE_P(v) == IS_STRING) {
-                /* Validate the raw JSON text client-side so a malformed
-                 * string fails here with a clear error instead of mid-stream
-                 * in the server block parse. php_json_validate (8.3+) checks
-                 * without materializing the value tree; older PHP decodes and
-                 * discards. Clear any pending error state defensively (we pass
-                 * no THROW_ON_ERROR, so none is expected). */
 #if PHP_VERSION_ID >= 80300
                 if (!php_json_validate_ex(Z_STRVAL_P(v), Z_STRLEN_P(v), 0,
                                           PHP_JSON_PARSER_DEFAULT_DEPTH)) {
@@ -2363,10 +1996,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                 }
 #else
                 zval probe;
-                /* php_json_decode leaves its output zval UNTOUCHED on FAILURE
-                 * (core json_decode does RETURN_NULL() without a dtor on that
-                 * path); initializing first keeps the success-path dtor and any
-                 * failure-path cleanup off uninitialized stack memory. */
+                /* php_json_decode leaves output untouched on failure; initialize before cleanup. */
                 ZVAL_UNDEF(&probe);
                 if (php_json_decode(&probe, Z_STRVAL_P(v), Z_STRLEN_P(v),
                                     /*assoc=*/true, PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE) {
@@ -2392,9 +2022,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
     case Type::Code::Bool:
     {
-        /* Strict bools only — do not use zend_is_true (string "false" is true
-         * in PHP). Accept IS_TRUE/IS_FALSE, 0/1 integers, and the string
-         * forms 0/1/true/false (case-insensitive). Reject everything else. */
+        /* zend_is_true("false") is true; parse boolean spellings explicitly. */
         auto value = std::make_shared<ColumnBool>();
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
@@ -2473,11 +2101,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     case Type::Code::Int128:
     {
         auto value = std::make_shared<ColumnInt128>();
-        /* Int128 range is [-2^127, 2^127-1]. parse_uint128_dec accepts up
-         * to 2^128-1, so an unbounded magnitude in (2^127, 2^128-1] used
-         * to silently wrap to negative via the static_cast. Bound the
-         * magnitude before casting; the negative-INT128_MIN edge needs
-         * special handling because -INT128_MIN is undefined. */
+        /* Bound unsigned magnitude before the signed cast; negating INT128_MIN is UB. */
         const absl::uint128 abs_int128_min = absl::uint128(1) << 127;
         const absl::uint128 int128_max     = abs_int128_min - 1;
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
@@ -2548,10 +2172,7 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
             zval *v = array_value;
             ZVAL_DEREF(v);
             if (Z_TYPE_P(v) == IS_NULL) {
-                /* Mirror the scalar strict_zval_* helpers: a bare NULL on a
-                 * non-Nullable Decimal is rejected (ColumnDecimal parses ""
-                 * to a silent 0). Only under AllowNullGuard (a Nullable
-                 * build) emit a "0" placeholder the null mask masks out. */
+                /* Decimal parses empty strings as zero; permit NULL only as a masked placeholder. */
                 if (g_allow_null_in_strict == 0) {
                     throw std::runtime_error(
                         "null cannot be assigned to non-Nullable column Decimal");
@@ -2621,22 +2242,14 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
         ZEND_HASH_FOREACH_VAL(values_ht, array_value)
         {
-            /* Deref before the IS_NULL test: nested in Array/Tuple, a cell
-             * can arrive as IS_REFERENCE. The child build below derefs (via
-             * strict_zval_*), so without this the bitmap would mark a by-ref
-             * null as non-null while the child writes a 0 placeholder,
-             * silently storing 0 instead of NULL. */
+            /* Dereference before masking, or a referenced NULL would be stored as zero. */
             zval *nv = array_value;
             ZVAL_DEREF(nv);
             nulls->Append(Z_TYPE_P(nv) == IS_NULL ? 1 : 0);
         }
         ZEND_HASH_FOREACH_END();
 
-        /* The null mask captures IS_NULL cells, so the recursive child
-         * build can accept NULL → typed-zero placeholder. Without the
-         * guard, strict_zval_long / strict_zval_double would now
-         * (post-CR-002) reject IS_NULL outright and break every
-         * Nullable insert. */
+        /* The bitmap masks NULL cells, so child conversion may use typed-zero placeholders. */
         AllowNullGuard nulls_ok;
         ColumnRef child = insertColumn(type_as_or_throw<NullableType>(type, "Nullable")->GetNestedType(), value_zval);
 
@@ -2645,10 +2258,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
 
     case Type::Code::Tuple:
     {
-        // Build one transposed list per tuple field (arity), iterating
-        // every input row to pull row[field]. The previous version
-        // looped by row count instead of arity, so multi-row tuple
-        // inserts walked off the end of tupleType when rowcount != arity.
         auto tupleType = type_as_or_throw<TupleType>(type, "Tuple")->GetTupleType();
         size_t arity = tupleType.size();
 
@@ -2685,9 +2294,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
                         throw std::runtime_error(
                             "Tuple row is missing a field value");
                     }
-                    /* Deref before transposing so a by-ref field value is
-                     * stored as its target, not an IS_REFERENCE the recursive
-                     * per-field build would have to unwrap. */
                     ZVAL_DEREF(fzval);
                     Z_TRY_ADDREF_P(fzval);
                     add_next_index_zval(return_tmp, fzval);
@@ -2770,13 +2376,6 @@ ColumnRef insertColumn(TypeRef type, zval *value_zval)
     }
 }
 
-// Cast through (zend_long) so signed types (Int8..Int64) keep their
-// sign on the way into PHP, instead of getting reinterpreted as huge
-// unsigned values. Unsigned types up to UINT64_MAX preserve their bit
-// pattern either way; PHP integers are signed 64-bit regardless.
-//
-// Shared three-way emit dispatch: is_array (nested cell) vs FETCH_ONE
-// (replace arr) vs default assoc key. Used by nearly every scalar read arm.
 static void emitStringCell(zval *arr, const char *s, size_t len,
                            const string& column_name, int8_t is_array, long fetch_mode)
 {
@@ -2829,12 +2428,8 @@ static void emitDoubleCell(zval *arr, double v,
     }
 }
 
-/* UTC civil-date rendering without libc gmtime: on 32-bit platforms
- * std::time_t is 32 bits, so routing epoch seconds through gmtime_r
- * truncates DateTime / Date32 values outside 1901..2038 before rendering
- * (pck-time-t-narrowing-32bit-6mo). civil_from_days is the inverse of the
- * days_from_civil arithmetic in to_time_t (Howard Hinnant's algorithm),
- * making rendering width-independent on every platform. */
+/* Avoid 32-bit time_t truncation in gmtime; use Howard Hinnant's inverse
+ * civil-date arithmetic, paired with days_from_civil in to_time_t. */
 static inline int64_t floor_div_86400(int64_t epoch, int64_t &secs_of_day)
 {
     int64_t days = epoch >= 0 ? epoch / 86400 : -((-epoch + 86399) / 86400);
@@ -2856,8 +2451,6 @@ static inline void civil_from_days(int64_t z, int &y, unsigned &m, unsigned &d)
     y = (int)(y_ + (m <= 2 ? 1 : 0));
 }
 
-/* Format a Unix epoch (int64 seconds) as "YYYY-MM-DD" or
- * "YYYY-MM-DD HH:MM:SS" into buf; returns the length. */
 static inline size_t format_epoch_utc(int64_t epoch, char *buf, size_t bufsz, bool with_time)
 {
     int64_t secs_of_day = 0;
@@ -2875,19 +2468,7 @@ static inline size_t format_epoch_utc(int64_t epoch, char *buf, size_t bufsz, bo
                             y, m, d, hh, mm, ss);
 }
 
-// Emit a Unix epoch as either a long or a civil-formatted string,
-// dispatched on fetch_mode and is_array. Used by DateTime, Date, and
-// Date32 reads which all share the same shape modulo the format string.
-//
-// All three wire types either prohibit negative values (Date is uint16,
-// DateTime is uint32) or treat them as valid pre-epoch dates (Date32);
-// `t == 0` is 1970-01-01, a valid value. We don't emit NULL for any
-// non-NULL server value here.
-//
-// t is int64_t end to end: the vendored At() returns std::time_t, which
-// narrows on 32-bit platforms, so callers pass RawAt() storage widened
-// here. Integers above ZEND_LONG_MAX surface as decimal strings via
-// emitSigned64Cell (e.g. DateTime 2106-02-07 on 32-bit PHP).
+// RawAt widens storage directly; At narrows through time_t on 32-bit platforms.
 static void emitEpoch(zval *arr, int64_t t, const char *fmt,
                       const string& column_name, int8_t is_array, long fetch_mode)
 {
@@ -2902,9 +2483,6 @@ static void emitEpoch(zval *arr, int64_t t, const char *fmt,
 }
 
 
-// Read one integer column cell (UInt8..UInt64, Int8..Int64, IPv4) and
-// emit it as a PHP long. The fetch-mode dispatch is identical across
-// all eight integer column types, so they all route through here.
 template <typename TCol>
 static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
                                  const string& column_name, int8_t is_array, long fetch_mode)
@@ -2920,13 +2498,7 @@ static inline void emitIntColumn(zval *arr, const ColumnRef& columnRef, int row,
 }
 
 
-// UInt64 specialization. Values above ZEND_LONG_MAX (2^63-1) lose
-// unsigned semantics when cast to zend_long — they read back as
-// negatives in PHP, and Map(UInt64,*) keys collapse distinct
-// unsigned values onto the same PHP-signed key. For values that
-// don't fit a signed PHP integer, emit a decimal string instead so
-// the user can round-trip safely. Values <= ZEND_LONG_MAX continue
-// to come back as PHP int for backward compatibility.
+// Values above ZEND_LONG_MAX need decimal strings for lossless PHP round-trips.
 static inline void emitUInt64Cell(zval *arr, uint64_t v,
                                   const string& column_name, int8_t is_array, long fetch_mode)
 {
@@ -2940,9 +2512,6 @@ static inline void emitUInt64Cell(zval *arr, uint64_t v,
 }
 
 
-// Build a PHP 2-element numeric array for a Point. Output is a freshly
-// initialized zval owned by the caller; the caller decides how to attach
-// it (next_index, assoc, or write-into-arr).
 static void pointToZval(zval *out, const std::tuple<double, double>& pt)
 {
     array_init_size(out, 2);
@@ -2950,9 +2519,7 @@ static void pointToZval(zval *out, const std::tuple<double, double>& pt)
     add_next_index_double(out, std::get<1>(pt));
 }
 
-// Geo nested types come back as clickhouse::ColumnArrayT::ArrayValueView,
-// not std::vector. The view is STL-iterable but not assignable to a
-// vector reference, so the helpers below take templated iterables.
+// Geo ArrayValueView is iterable but cannot bind to a vector reference.
 template <typename PointRange>
 static void ringRangeToZval(zval *out, const PointRange& ring)
 {
@@ -2975,8 +2542,6 @@ static void polygonRangeToZval(zval *out, const RingRange& poly)
     }
 }
 
-// Attach a built-up nested zval to the parent according to (is_array,
-// fetch_mode, column_name). Mirrors the dispatch pattern Array/Tuple use.
 static void emitNestedZval(zval *arr, zval *built, const string& column_name, int8_t is_array, long fetch_mode)
 {
     if (is_array) {
@@ -2999,8 +2564,6 @@ static void emitEnumColumn(zval *arr, const ColumnRef& columnRef, int row,
     emitStringCell(arr, name.data(), name.length(), column_name, is_array, fetch_mode);
 }
 
-/* Numeric read family: every int/uint width shares emitIntColumn, both
- * float widths share emitDoubleCell. */
 static void readNumericCell(Type::Code code, zval *arr, const ColumnRef& columnRef, int row,
                             const string& column_name, int8_t is_array, long fetch_mode)
 {
@@ -3044,7 +2607,7 @@ static void readNumericCell(Type::Code code, zval *arr, const ColumnRef& columnR
 
 void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string& column_name, int8_t is_array, long fetch_mode)
 {
-    ConvertDepthGuard depth_guard;  // shared with createColumn / insertColumn
+    ConvertDepthGuard depth_guard;
     switch (columnRef->Type()->GetCode())
     {
     case Type::Code::UInt64:
@@ -3055,10 +2618,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         break;
     case Type::Code::IPv4:
     {
-        /* ColumnIPv4 is no longer a ColumnUInt32 subclass in v2.6.1, so
-         * emit the canonical dotted-quad string. At() + inet_ntop into a
-         * stack buffer is exactly what AsString() does internally, minus
-         * its per-cell std::string heap allocation. */
+        /* IPv4 no longer inherits ColumnUInt32; render via a stack buffer to avoid AsString allocation. */
         auto col_ip = as_or_throw<ColumnIPv4>(columnRef, "IPv4 read");
         in_addr addr = col_ip->At(row);
         char buf[INET_ADDRSTRLEN];
@@ -3096,15 +2656,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     case Type::Code::Decimal128:
     {
         auto col = as_or_throw<ColumnDecimal>(columnRef, "Decimal read");
-        // Format with the scale point so a value inserted as "12.34" reads
-        // back as "12.34", not the unscaled storage integer 1234. The
-        // decimal point and any leading-zero padding are inserted in
-        // place in the stack buffer so no std::string allocations fire
-        // per cell. Worst case: 1 byte sign + 39 digits + 1 '.' = 41.
-        /* Scale is memoized per column (see cachedDecimalScale); the >38
-         * guard lives on the resolve path. Decimal128 caps scale at 38,
-         * so anything larger is a Decimal256 (unsupported here) or a
-         * hostile/MITM server schema. */
+        // Worst case: sign + 39 digits + decimal point = 41 bytes.
         size_t scale = cachedDecimalScale(columnRef->Type());
         Int128 raw = col->At(row);
         char buf[64];
@@ -3113,9 +2665,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             bool neg = (buf[0] == '-');
             size_t sign_off = neg ? 1 : 0;
             size_t dlen = l - sign_off;
-            // If dlen <= scale we need to pad: insert (scale+1 - dlen)
-            // zeros after the sign, so "5" with scale 3 → "0.005"
-            // (sign_off + 5 chars: 0 . 0 0 5).
+            // Pad before inserting the decimal point: 5 at scale 3 becomes 0.005.
             if (dlen <= scale) {
                 size_t pad = scale + 1 - dlen;
                 memmove(buf + sign_off + pad, buf + sign_off, dlen);
@@ -3123,7 +2673,6 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 l += pad;
                 dlen += pad;
             }
-            // Insert '.' before the last `scale` digits.
             size_t dot_pos = sign_off + dlen - scale;
             memmove(buf + dot_pos + 1, buf + dot_pos, scale);
             buf[dot_pos] = '.';
@@ -3159,33 +2708,22 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::JSON:
     {
-        /* Reads require output_format_native_write_json_as_string=1 on the
-         * session; without it ColumnJSON::LoadPrefix throws a ProtocolError
-         * before we ever reach here. Default surfaces the raw JSON string.
-         * JSON_AS_ARRAY / JSON_AS_OBJECT decode it to a PHP value (assoc
-         * array vs stdClass); ARRAY wins if both bits are set. */
+        /* Native JSON reads require output_format_native_write_json_as_string=1.
+         * JSON_AS_ARRAY wins when both decode flags are set. */
         auto j_col = as_or_throw<ColumnJSON>(columnRef, "JSON read");
         auto sv = j_col->At(row);
         if (fetch_mode & (SC_FETCH_JSON_AS_ARRAY | SC_FETCH_JSON_AS_OBJECT))
         {
             bool assoc = (fetch_mode & SC_FETCH_JSON_AS_ARRAY) != 0;
             zval decoded;
-            /* At() returns a string_view into ColumnString's packed buffer,
-             * so the byte past the end is the next cell, not a NUL. PHP's
-             * re2c JSON scanner needs a NUL terminator (json_decode always
-             * gets a zend_string), so decode from a terminated copy. */
+            /* Packed string views lack a NUL terminator required by the PHP JSON scanner. */
             /* php_json_decode takes char* (not const) on PHP 7.4; &str[0]
              * is a mutable, NUL-terminated pointer on every target. */
             std::string json_str(sv);
-            /* Bound the decode: an unbounded server cell would amplify into
-             * the PHP value graph before the parser-depth bound matters. */
             if (json_str.size() > MAX_JSON_CELL_BYTES) {
                 throw std::runtime_error("JSON read: cell exceeds maximum JSON decode size (16 MiB)");
             }
-            /* ZVAL_UNDEF first: php_json_decode does not touch the output zval
-             * on FAILURE, so the old unconditional zval_ptr_dtor(&decoded) ran
-             * over uninitialized stack memory whenever the server sent a value
-             * re2c could not parse. */
+            /* php_json_decode leaves output untouched on failure. */
             ZVAL_UNDEF(&decoded);
             if (php_json_decode(&decoded, &json_str[0], json_str.size(), assoc,
                                 PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE)
@@ -3213,13 +2751,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::FixedString:
     {
-        // ColumnFixedString::At returns a string_view over the full fixed-size
-        // buffer, including trailing NULs added by ClickHouse to pad short
-        // values up to the column's declared width. Trim trailing NULs so the
-        // PHP-side value matches the original input -- unless FIXEDSTRING_BINARY
-        // is set, in which case return the full declared width verbatim so
-        // binary payloads (IPv6, digests, packed structs) that legitimately end
-        // in NUL bytes survive the round-trip.
+        // FIXEDSTRING_BINARY preserves trailing NULs that may be payload rather than padding.
         auto fs_col = as_or_throw<ColumnFixedString>(columnRef, "FixedString read");
         auto col = (*fs_col)[row];
         size_t len = col.length();
@@ -3233,10 +2765,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     }
     case Type::Code::IPv6:
     {
-        /* ColumnIPv6 is a ColumnFixedString sibling since v2.6.1
-         * (composition, not inheritance), so read the canonical form via
-         * At() + inet_ntop into a stack buffer -- what AsString() does
-         * internally, minus its per-cell std::string heap allocation. */
+        /* IPv6 uses composition since v2.6.1; render directly to avoid AsString allocation. */
         auto col_ip = as_or_throw<ColumnIPv6>(columnRef, "IPv6 read");
         in6_addr addr = col_ip->At(row);
         char buf[INET6_ADDRSTRLEN];
@@ -3262,10 +2791,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         size_t precision = cachedDateTime64Precision(columnRef->Type());
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
-        /* Floor division: C++ integer division truncates toward zero, so a
-         * pre-epoch raw like -5 (1969-... .5s) would split to whole=0,frac=5
-         * and render as 1970-...,.5 — an hour/second ahead of the truth.
-         * Carry the borrow so the fraction stays in [0, scale). */
+        /* Floor-divide pre-epoch timestamps so the fraction stays in [0, scale). */
         int64_t whole_i = raw / scale;
         int64_t frac = raw % scale;
         if (frac < 0) { frac += scale; --whole_i; }
@@ -3327,10 +2853,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         int64_t scale = pow10_i64(precision);
         int64_t raw = col->At(row);
         if (fetch_mode & SC_FETCH_DATE_AS_STRINGS) {
-            /* Time64 is a signed sign-magnitude duration. Take the sign from
-             * raw, not from `whole`: a sub-second negative like -0.5s has
-             * whole==0, so `whole < 0` would drop the leading '-' and render
-             * "00:00:00.5" instead of "-00:00:00.5". */
+            /* Take sign from raw: negative sub-second durations have whole == 0. */
             bool neg = raw < 0;
             uint64_t araw = neg ? uint64_t(0) - uint64_t(raw) : uint64_t(raw);
             uint64_t abs_whole = araw / (uint64_t)scale;
@@ -3373,10 +2896,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
     {
         auto array = as_or_throw<ColumnArray>(columnRef, "Array read");
         auto col = array->GetAsColumn(row);
-        /* Forward only the value-shaping flags (DATE_AS_STRINGS,
-         * UUID_WITH_DASHES, FIXEDSTRING_BINARY, JSON_AS_*) into nested
-         * cells; row-shape flags (FETCH_ONE/KEY_PAIR/COLUMN) must not leak
-         * into element decoding. */
+        /* Nested cells accept value-shaping flags only, never result-shape flags. */
         long nested_mode = fetch_mode & SC_FETCH_VALUE_FLAGS;
         if (fetch_mode & SC_FETCH_ONE) {
             array_init_size(arr, (uint32_t)col->Size());
@@ -3388,9 +2908,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             zval *return_tmp;
             SC_MAKE_STD_ZVAL(return_tmp);
             array_init_size(return_tmp, (uint32_t)col->Size());
-            /* return_tmp holds a heap HashTable not yet attached to arr; a
-             * throw mid-loop (nested depth cap, type mismatch) would orphan
-             * it. Free on unwind, mirroring do_select_into's row guard. */
+            /* Free partial nested output on throw before ownership transfers to arr. */
             try {
                 for (size_t i = 0; i < col->Size(); ++i)
                 {
@@ -3549,10 +3067,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         ColumnRef keys_any = (*tup)[0];
         ColumnRef values_any = (*tup)[1];
         size_t entry_count = keys_any->Size();
-        /* Defensive: a malformed/malicious server response could disagree on
-         * key/value counts in either direction; decoding past the shorter
-         * column reads out of bounds, and silently accepting an oversize
-         * value column would drop server data. */
+        /* Unequal column lengths would read out of bounds or silently drop map values. */
         if (values_any->Size() != entry_count) {
             throw std::runtime_error("Map column key/value size mismatch");
         }
@@ -3560,10 +3075,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
         zval *map_zv;
         SC_MAKE_STD_ZVAL(map_zv);
         array_init_size(map_zv, (uint32_t)entry_count);
-        /* DR-014: the key/value column casts, decodeKey, and the
-         * unsupported-inner-type throw below all run before map_zv is attached
-         * to the parent. Free the partially-built map on any such throw so the
-         * heap zval isn't orphaned (mirrors the Array/Tuple read guard). */
+        /* Free partial map output on throw before ownership transfers to the parent. */
         struct MapZvGuard {
             zval *z;
             ~MapZvGuard() { if (z) zval_ptr_dtor(z); }
@@ -3605,14 +3117,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             break;
         }
 
-        /* Pre-cast the key and value columns once per row instead of per
-         * entry. The keys_any / values_any column slices don't change
-         * across the entry loop; only the row index inside them does.
-         * Doing as_or_throw inside decodeKey would re-run a
-         * dynamic_pointer_cast for every map entry. For Map(Int64, V)
-         * with 100 entries × 1M rows that was 100M unnecessary casts.
-         * Only one of these typed pointers is populated for any given
-         * cell; the others stay null. */
+        /* Cast once per Map cell; the entry loop only changes the index. */
         std::shared_ptr<ColumnString>  k_str_col;
         std::shared_ptr<ColumnInt64>   k_i64_col;
         std::shared_ptr<ColumnUInt64>  k_u64_col;
@@ -3642,8 +3147,6 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 throw std::runtime_error("Map read: unsupported key type " + key_type_ref->GetName());
         }
 
-        // Same hoist for value column: one cast per Map cell, not per
-        // entry. Only the pointer matching value_code is populated.
         std::shared_ptr<ColumnString>  v_str_col;
         std::shared_ptr<ColumnInt64>   v_i64_col;
         std::shared_ptr<ColumnUInt64>  v_u64_col;
@@ -3673,9 +3176,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 throw std::runtime_error("Map read: unsupported value type " + value_type_ref->GetName());
         }
 
-        // Decode a key column at row i into one of three forms: string,
-        // long integer, or double. PHP arrays only key by string or
-        // long; doubles get formatted to a canonical string key.
+        // PHP keys are strings/integers; render floating keys as canonical strings.
         auto signedKey = [](int64_t value, std::string &str_buf,
                             zend_long &long_out) -> int {
             if (value >= (int64_t)ZEND_LONG_MIN &&
@@ -3734,11 +3235,7 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
         };
 
-        /* Format a Float key as a locale-independent decimal string. The
-         * naive snprintf("%.17g") honors LC_NUMERIC, so the same Float64
-         * map key would surface under a different PHP array key under
-         * setlocale(LC_NUMERIC, 'de_DE'). php_gcvt with explicit '.' is
-         * the same fix CR-303 applied at the SQL parameter boundary. */
+        /* Keep floating map keys stable across LC_NUMERIC locales. */
         auto fmtFloatKey = [](double dk, char *buf, size_t bufsz) -> int {
             php_gcvt(dk, 17, '.', 'e', buf);
             (void)bufsz;
@@ -3751,11 +3248,8 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
                 "array key; pass ClickHouse::MAP_AS_PAIRS for an ordered "
                 "lossless result");
         };
-        /* zend_symtable_str_* semantics: a canonical decimal string becomes an
-         * integer key, matching how add_assoc_*_ex used to shape these arrays.
-         * The _add (not _add_new) variants are load-bearing — _add_new sets
-         * HASH_ADD_NEW, which skips the existence check entirely and appends a
-         * second bucket under the same key instead of returning NULL. */
+        /* Canonical decimal strings become integer keys. Use _add: _add_new
+         * bypasses duplicate checks and can create multiple buckets for one key. */
         auto symtableAdd = [](HashTable *ht, const char *key, size_t len,
                               zval *value) -> zval * {
             zend_ulong numeric_index;
@@ -3783,8 +3277,6 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             }
         };
 
-        // Helper: add (string|long-as-string) keyed value into map_zv.
-        // Handles all three key categories returned by decodeKey.
         auto addStrL = [&](int kkind, const std::string &sb, zend_long lk, double dk,
                            const char *vptr, size_t vlen) {
             zval value;
@@ -3823,18 +3315,13 @@ void convertToZval(zval *arr, const ColumnRef& columnRef, int row, const string&
             addStrL(kkind, sb, lk, dk, buf, len);
         };
 
-        /* Reuse the key scratch buffer across entries: decodeKey assigns
-         * into it (assign() keeps capacity), so a Map(String, V) with N
-         * entries allocates once instead of N times. The per-row tuple
-         * slice above (GetAsColumn) stays: ColumnMap exposes no offset
-         * accessor, so avoiding it would need vendored-API changes. */
+        /* Reuse key buffer capacity. ColumnMap has no offset accessor to avoid GetAsColumn. */
         std::string str_key_buf;
         for (size_t i = 0; i < entry_count; ++i) {
             zend_long long_key = 0;
             double dbl_key = 0.0;
             int kkind = decodeKey(i, str_key_buf, long_key, dbl_key);
 
-            // Decode value, dispatch by value type.
             if (value_code == Type::Code::String) {
                 std::string_view vv = (*v_str_col)[i];
                 addStrL(kkind, str_key_buf, long_key, dbl_key, vv.data(), vv.length());

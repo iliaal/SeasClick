@@ -14,7 +14,6 @@ $c->execute("DROP TABLE IF EXISTS test.stream_hdr");
 $c->execute("CREATE TABLE test.stream_hdr (id UInt32, label String) ENGINE=Memory");
 $c->insert("test.stream_hdr", ["id", "label"], [[1, "one"], [2, "two"]]);
 
-// TSVWithNames header.
 $mem = fopen("php://memory", "w+b");
 $n = $c->selectToStream(
     "SELECT id, label FROM test.stream_hdr ORDER BY id",
@@ -25,8 +24,6 @@ rewind($mem);
 echo stream_get_contents($mem);
 fclose($mem);
 
-// CSVWithNames header — names with characters needing quoting are
-// escaped consistently with cell values.
 $mem = fopen("php://memory", "w+b");
 $n = $c->selectToStream(
     "SELECT id AS \"id,quoted\", label FROM test.stream_hdr ORDER BY id",
@@ -38,7 +35,6 @@ $raw = stream_get_contents($mem);
 echo str_replace(["\r", "\n"], ['<CR>', "<LF>\n"], $raw);
 fclose($mem);
 
-// Header still emits when the result is empty.
 $mem = fopen("php://memory", "w+b");
 $n = $c->selectToStream(
     "SELECT id, label FROM test.stream_hdr WHERE id > 99",

@@ -30,7 +30,6 @@ rewind($mem);
 echo stream_get_contents($mem);
 fclose($mem);
 
-// TSV alias.
 $mem = fopen("php://memory", "w+b");
 $n = $c->selectToStream(
     "SELECT id FROM test.stream_basic ORDER BY id LIMIT 2",

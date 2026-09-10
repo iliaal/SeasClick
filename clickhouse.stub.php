@@ -21,11 +21,8 @@ final class ClickHouse
     protected int $port = 9000;
     protected string $database = "default";
     protected ?string $user = null;
-    // No `passwd` property is declared. The secret stays out of
-    // get_object_vars, var_dump, serialize, and reflection by simply
-    // not being stored on the object.
-    // 0=none, 1=lz4, 2=zstd. Was `bool` but that coerced 2 → true → 1
-    // on read-back, silently downgrading "zstd" callers to LZ4.
+    // Keep passwords out of properties to prevent introspection leaks.
+    // 0=none, 1=lz4, 2=zstd; bool would silently downgrade zstd to lz4.
     protected int $compression = 0;
     protected int $retry_timeout = 5;
     protected int $retry_count = 1;

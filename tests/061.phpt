@@ -8,9 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-207: retry_count used to silently wrap when
-// passed a negative value (-1 → ~UINT_MAX retries). The ms-variant
-// blocks already validated; the seconds variants didn't.
+// Negative retries would wrap to a huge unsigned count.
 
 $base = clickhouse_test_config();
 

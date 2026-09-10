@@ -13,10 +13,6 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.crlf_tail");
 $c->execute("CREATE TABLE test.crlf_tail (id UInt32, name String) ENGINE=Memory");
 
-/* CRLF line endings with a trailing blank line at EOF. The blank line's
- * deferred materialization used to fire on the CRLF tail '\n' at the top
- * of the parse loop, turning the trailing blank into a real 0-column row
- * and failing the row-width check. The trailing blank must be dropped. */
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\talice\r\n2\tbob\r\n\r\n");
 rewind($mem);

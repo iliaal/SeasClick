@@ -8,9 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// A bare PHP null on a non-Nullable JSON column used to be stored silently
-// as the empty object {} (the Nullable placeholder), unlike Bool/IPv4/String
-// which reject null unless the AllowNullGuard is active.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->setSettings([
@@ -24,12 +21,10 @@ $c->execute("CREATE TABLE test.dr001 (j JSON) ENGINE = Memory");
 try { $c->insert("test.dr001", ['j'], [[null]]); echo "non-nullable null: NO THROW\n"; }
 catch (ClickHouseException $e) { echo "non-nullable null: REJECTED\n"; }
 
-// A real JSON value still inserts and reads back.
 $c->insert("test.dr001", ['j'], [['{"ok":1}']]);
 $rows = $c->select("SELECT toString(j) v FROM test.dr001");
 echo "rowcount: ", count($rows), " value: ", $rows[0]['v'], "\n";
 
-// Nullable(JSON) still accepts null via the AllowNullGuard path.
 $c->execute("DROP TABLE IF EXISTS test.dr001n");
 $c->execute("CREATE TABLE test.dr001n (j Nullable(JSON)) ENGINE = Memory");
 $c->insert("test.dr001n", ['j'], [[null], ['{"x":2}']]);

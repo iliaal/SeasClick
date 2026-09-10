@@ -8,9 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-209: Map(Int*, *) / Map(UInt*, *) / Map(Float*, *)
-// keys were parsed via strtoll/strtoull/strtod with no end-pointer
-// check, so "abc" silently became 0 and "12x" silently became 12.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -28,7 +25,6 @@ foreach ($probes as $label => [$cols, $vals]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: valid numeric-string keys still work.
 $c->insert("test.map_keys", ['id', 'm_i', 'm_u', 'm_f'],
     [[1, [1 => 'a', 2 => 'b'], [10 => 'x'], ['1.5' => 'y']]]);
 $rows = $c->select("SELECT id FROM test.map_keys");

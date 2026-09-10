@@ -8,10 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-/* The Select packet loop runs userland progress callbacks. One that
- * fclose()s the destination stream used to leave the cached php_stream*
- * dangling and the next block flush a use-after-free. The stream is now
- * re-resolved on every flush, so a closed stream becomes a clean throw. */
+/* Closing the stream during a callback invalidates cached php_stream pointers. */
 $ch = new ClickHouse(clickhouse_test_config());
 $ch->setSettings(["interactive_delay" => "10000"]);
 $fp = fopen("php://temp", "r+");
@@ -28,7 +25,6 @@ try {
     echo (strpos($e->getMessage(), "closed during the query") !== false ? "closed cleanly" : "other"), "\n";
 }
 
-/* The client is still usable after the recovered failure. */
 echo "ping: ", ($ch->ping() ? "ok" : "fail"), "\n";
 ?>
 --EXPECT--

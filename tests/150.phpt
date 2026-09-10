@@ -11,9 +11,6 @@ require __DIR__ . "/_clickhouse.inc";
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 
-// Each case puts a by-reference cell inside a nested composite; without a
-// dereference the type branch sees IS_REFERENCE and either errors or, worse,
-// silently writes a placeholder (null -> 0 / "").
 
 $c->execute("DROP TABLE IF EXISTS test.r_an");
 $c->execute("CREATE TABLE test.r_an (a Array(Nullable(Int32))) ENGINE = Memory");

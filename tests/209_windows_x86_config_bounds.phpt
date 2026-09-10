@@ -10,11 +10,7 @@ if (PHP_INT_SIZE !== 4) {
 ?>
 --FILE--
 <?php
-// Millisecond timeouts accept the full UINT32 range (up to 4294967295ms);
-// on 32-bit PHP values above INT32_MAX arrive as float, which the bounds
-// check accepts via double-aware parsing. Construction connects eagerly,
-// so a refused connection *past* option parsing proves the bounds: only an
-// "out of range" throw fails this test outright.
+// A refused connection proves option parsing accepted UINT32 values arriving as doubles.
 try {
     new ClickHouse([
         "host" => "127.0.0.1",

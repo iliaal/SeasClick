@@ -10,9 +10,7 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-/* A collision must throw. zend_hash_*_add_new() skips the existence check
- * and appends a second bucket under the same key, so a "rejection" built on
- * its return value silently produced arrays with duplicate keys instead. */
+/* _add_new bypasses duplicate checks and can create two buckets for one key. */
 $collisions = array(
     "string"          => "SELECT map('a','1','a','2','b','3') AS m",
     "packed int"      => "SELECT map(toInt64(1),'x',toInt64(1),'y') AS m",
@@ -46,10 +44,7 @@ try {
         "\n";
 }
 
-/* Keys that do not collide keep the shape add_assoc_*_ex produced: a
- * canonical decimal string becomes an integer key, everything else stays a
- * string. Guards against both a regression to duplicate buckets and to a
- * blanket numeric-string rejection. */
+/* Canonical decimal keys become integers; other strings retain their identity. */
 $shapes = array(
     "numeric string"  => "SELECT map('123','a','x','b') AS m",
     "leading zero"    => "SELECT map('01','a','1','b') AS m",

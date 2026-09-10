@@ -10,10 +10,6 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-/* An empty-string placeholder key has no valid {name} or {name:Type}
- * spelling; it used to fall through to the generic "does not appear in
- * the SQL" path (or, for a typed form, build a nameless server param).
- * It must be rejected up front as a malformed key. */
 try {
     $c->select("SELECT {:UInt8} AS x", ["" => 1], ClickHouse::FETCH_ONE);
     echo "no throw\n";
@@ -21,7 +17,6 @@ try {
     echo "non-empty msg=", (strpos($e->getMessage(), "non-empty") !== false ? "yes" : "no"), "\n";
 }
 
-/* A well-formed typed placeholder still works. */
 $v = $c->select("SELECT {v:UInt8} AS x", ["v" => 7], ClickHouse::FETCH_ONE);
 echo "typed ok=", $v, "\n";
 ?>

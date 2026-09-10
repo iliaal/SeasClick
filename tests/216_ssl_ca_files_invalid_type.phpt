@@ -6,10 +6,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 clickhouse_skip_if_no_server();
-/* The ssl_ca_files validation lives inside the WITH_OPENSSL constructor
- * branch behind want_ssl. On a build without --enable-clickhouse-openssl
- * every 'ssl' => true construction throws "without TLS support" before the
- * branch is reachable, so skip like tests/027 does for its TLS lane. */
+/* A TLS-enabled build is required to reach CA-file validation. */
 $probe = clickhouse_test_config();
 $probe['ssl'] = true;
 try {
@@ -25,9 +22,6 @@ try {
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// A non-string/non-array value used to silently connect with NO CA files
-// set. (A plain string is VALID here -- one CA file path -- so the invalid
-// shapes are true scalars like int/bool/float.)
 $base = clickhouse_test_config();
 $base['ssl'] = true;
 
@@ -43,8 +37,6 @@ foreach ([123, true, false, 1.5] as $bad) {
     }
 }
 
-// Array elements must be strings too: an int/bool element must not coerce to
-// "123"/"1" and connect with a bogus CA path.
 foreach ([[123], [true]] as $bad) {
     $cfg = $base;
     $cfg['ssl_ca_files'] = $bad;
@@ -57,10 +49,7 @@ foreach ([[123], [true]] as $bad) {
     }
 }
 
-// A proper array passes config-shape validation; any failure past that point
-// (connect-level, bogus CA path) must NOT name ssl_ca_files. Only transport /
-// verification errors count as accepted here: an ssl_ca_files-shaped message
-// is a wrongful rejection, and any non-ClickHouse throw is a hard failure.
+// Transport/verification failures prove the valid array passed shape validation.
 $ok = $base;
 $ok['ssl_ca_files'] = ['/nonexistent/ca.pem'];
 try {

@@ -18,13 +18,7 @@
 
 #define SC_MAKE_STD_ZVAL(p)             zval _stack_zval_##p; p = &(_stack_zval_##p)
 
-/*
- * rv must be a caller-owned zval that outlives the use of the returned
- * pointer. zend_read_property returns a pointer INTO rv whenever the read
- * is satisfied by a magic __get rather than a declared property slot, so a
- * function-local rv (the previous design) left the caller dereferencing an
- * expired stack frame for any subclass that defines __get.
- */
+/* __get may return a pointer into rv; the caller must keep rv alive. */
 static inline zval* sc_zend_read_property(zend_class_entry *class_ptr, zval *obj, const char *s, int len, int silent, zval *rv)
 {
 #if PHP_VERSION_ID < 80000
@@ -52,10 +46,7 @@ static inline void sc_zend_update_property_stringl(zend_class_entry *scope, zval
 #endif
 }
 
-/* Deref the found value so callers branching on Z_TYPE_P(v) see the real
- * type rather than IS_REFERENCE (a by-ref config value, e.g.
- * ['compression' => &$x], would otherwise fall through type checks). The
- * conditional-assignment keeps it a single expression usable in `if`. */
+/* Referenced config values must expose their underlying type to callers. */
 #define php_array_get_value(ht, str, v) \
     (((v = zend_hash_str_find(ht, (char *)str, sizeof(str)-1)) != NULL) \
      && ((v = (Z_ISREF_P(v) ? Z_REFVAL_P(v) : v)), !ZVAL_IS_NULL(v)))
@@ -68,24 +59,8 @@ static inline void sc_zend_update_property_stringl(zend_class_entry *scope, zval
 #  endif
 #endif
 
-/*
- * gen_stub.php on PHP master emits typed-parameter, typed-return-value, and
- * typed-class-constant macros that don't exist on older PHP. Shim them to
- * pre-typed equivalents so the generated arginfo header compiles unchanged
- * across the entire build matrix (PHP 7.4 through 8.5).
- *
- * The shims drop type information rather than emulate it. On builds older
- * than the threshold for each shim, reflection signatures revert to untyped
- * (parameter and return types disappear; typed class constants become
- * untyped). Runtime behavior is unchanged; only the introspection surface
- * is reduced.
- *
- * If gen_stub.php starts emitting more 8.x-only macros, extend this block
- * rather than narrowing the build matrix.
- */
+/* Keep generated arginfo usable on older PHP, dropping only unsupported types. */
 
-/* PHP 8.4: zend_register_internal_class_with_flags rolls class registration
- * and flag setting into one call. Pre-8.4 splits them. */
 #if PHP_VERSION_ID < 80400
 static zend_always_inline zend_class_entry *zend_register_internal_class_with_flags(
     zend_class_entry *class_entry,
@@ -100,9 +75,7 @@ static zend_always_inline zend_class_entry *zend_register_internal_class_with_fl
 }
 #endif
 
-/* PHP 8.3: typed class constants. Pre-8.3 uses the untyped variant; the
- * type argument is discarded. The shim returns void rather than
- * zend_class_constant* because the generated code never reads the return. */
+/* Generated callers ignore the return value; pre-8.3 constants are untyped. */
 #if PHP_VERSION_ID < 80300
 static zend_always_inline void zend_declare_typed_class_constant(
     zend_class_entry *ce,
@@ -117,42 +90,16 @@ static zend_always_inline void zend_declare_typed_class_constant(
 }
 #endif
 
-/* PHP 8.0:
- *
- * - The IS_MIXED type tag and default-value-aware argument macros are
- *   8.0+ only. Pre-8.0 has neither. The native ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX
- *   exists on 7.4 but its expansion references the `type` argument, so
- *   passing IS_MIXED through it fails at compile time even though the
- *   outer macro is recognized.
- * - PHP 7.4 can represent the scalar/array/object return types generated
- *   for this extension. Define only the PHP 8-only mixed/static tags as
- *   untyped so the native 7.4 macro preserves every representable type.
- */
 #if PHP_VERSION_ID < 80000
-/* ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE is wholly new in 8.0; pre-8.0
- * keeps the type info but drops the default-value annotation. */
 # define ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(pass_by_ref, name, type, allow_null, default_value) \
     ZEND_ARG_TYPE_INFO(pass_by_ref, name, type, allow_null)
-/* ZEND_ARG_TYPE_MASK is PHP 8.0+ (union-typed parameters such as
- * setVerbose's bool|callable|null). Pre-8.0 cannot express a union in
- * zend_arg_info, so drop to untyped, mirroring the IS_MIXED precedent.
- * The mask and default arguments go unused, so version-specific MAY_BE_*
- * tokens in the mask (e.g. MAY_BE_CALLABLE) never expand here. */
+/* PHP 7.4 cannot express unions; unused mask tokens must not expand. */
 # define ZEND_ARG_TYPE_MASK(pass_by_ref, name, type_mask, default_value) \
     ZEND_ARG_TYPE_INFO(pass_by_ref, name, 0, 0)
-/* IS_MIXED is a PHP 8.0+ type tag (value 0x09). On 7.4 it isn't
- * declared. Return-type uses are stripped above by the
- * ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX shim, but parameter types
- * reach ZEND_ARG_TYPE_INFO directly with the IS_MIXED token still in
- * place. Define it to 0 (= IS_UNDEF, "no type constraint") so the
- * argument compiles untyped on 7.4, matching pre-8.0 reflection. */
+/* Only mixed/static become untyped; native 7.4 macros preserve other types. */
 # define IS_MIXED 0
 # define IS_STATIC 0
-/* gen_stub builds typed properties / typed class constants via
- * (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_<TYPE>[|MAY_BE_NULL]). 7.4
- * has typed properties but represents zend_type as an encoded integer
- * rather than PHP 8's mask structure. Map the generated single-type
- * masks to that encoding; nullable properties add the existing low bit. */
+/* PHP 7.4 encodes zend_type as an integer with a nullable low bit. */
 # define ZEND_TYPE_INIT_MASK(mask) (mask)
 # define MAY_BE_LONG ZEND_TYPE_ENCODE(IS_LONG, 0)
 # define MAY_BE_STRING ZEND_TYPE_ENCODE(IS_STRING, 0)

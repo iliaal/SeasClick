@@ -8,15 +8,11 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-301 / CR-006: createColumn / insertColumn share
-// ConvertDepthGuard (cap 32). Shallow nested Tuple must succeed; a
-// type whose nest depth exceeds 32 must throw on insert, not segfault.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.depth_t");
 
-// Shallow Tuple-of-Tuple nesting (3 levels).
 $c->execute("CREATE TABLE test.depth_t (t Tuple(Tuple(Tuple(Int32)))) ENGINE = Memory");
 try {
     $c->insert("test.depth_t", ["t"], [[[[[42]]]]]);
@@ -35,7 +31,6 @@ for ($i = 0; $i < 40; $i++) {
 }
 $c->execute("CREATE TABLE test.depth_t (t $inner) ENGINE = Memory");
 
-// A matching nested PHP value of depth 40 (array-wrapped once per Tuple).
 $val = 7;
 for ($i = 0; $i < 40; $i++) {
     $val = [$val];

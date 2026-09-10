@@ -8,16 +8,9 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-001: a row / progress / profile / verbose callback
-// that calls back into the SAME ClickHouse instance pushes a new query
-// onto a wire still owned by the outer Client::Impl::ExecuteQuery loop.
-// The next ReceivePacket walks invalidated state and SEGVs the worker.
-// Per-object QueryActiveGuard rejects the reentry with a ClickHouse
-// exception. A separate ClickHouse instance is still allowed.
 
 $c = new ClickHouse(clickhouse_test_config());
 
-// Same-client reentry: should throw, not crash.
 try {
     $c->selectStreamCallback(
         "SELECT number FROM system.numbers LIMIT 3",
@@ -34,7 +27,6 @@ try {
     }
 }
 
-// After the failed reentry, the outer client must still be usable.
 try {
     $c->resetConnection();
     $r = $c->select("SELECT 42 AS x", [], ClickHouse::FETCH_ONE);
@@ -43,7 +35,6 @@ try {
     echo "post-reentry recovery: failed: ", $e->getMessage(), "\n";
 }
 
-// Separate-client reentry remains supported.
 $other = new ClickHouse(clickhouse_test_config());
 $seen = 0;
 try {

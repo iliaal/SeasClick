@@ -8,13 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// g_allow_null_in_strict is thread-local and shared across ClickHouse
-// clients. It is bumped only during a Nullable child build, but that build
-// runs userland (__toString / jsonSerialize). If that userland reenters a
-// SECOND client's insert into a NON-Nullable column with a bare null, the
-// second insert used to observe the first's relaxed state and silently
-// store 0/"". Each insert entrypoint now resets the guard, so the second
-// client rejects the null.
+// __toString reentry must not carry client A's relaxed Nullable state into client B.
 
 $cfg = clickhouse_test_config();
 $a = new ClickHouse($cfg);

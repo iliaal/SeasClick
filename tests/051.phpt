@@ -4,12 +4,7 @@ ClickHouse offline surface: classes, constants, methods, exception path (no serv
 clickhouse
 --FILE--
 <?php
-/* Server-free smoke. Validates that the .dll/.so loads, every public
- * class is registered, every constant has the documented value, every
- * method is present with the right argument count, and the exception
- * boundary fires cleanly when the constructor cannot reach a server.
- * Also doubles as a Windows CI smoke since the rest of the suite skips
- * up-front when no server is present. */
+/* Also runs on Windows, where server-dependent tests skip. */
 
 echo "ext=", extension_loaded("clickhouse") ? 1 : 0, "\n";
 
@@ -68,7 +63,6 @@ foreach ($methods as $m => $arity) {
 echo "missing_methods=", count($missing) ? implode(",", $missing) : "none", "\n";
 echo "bad_arity=", count($bad_arity) ? implode(",", $bad_arity) : "none", "\n";
 
-/* Iterator surface. */
 $it_methods = ["rewind", "valid", "current", "key", "next", "count"];
 $it_missing = [];
 foreach ($it_methods as $m) {

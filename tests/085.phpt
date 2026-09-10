@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-11-followup CR-001: buildColumnMajorRows looped
-// only `i < columns_count` and silently ignored any cells past that
-// position. A row like `[1, 99]` against a single-column table landed
-// as `1` with `99` dropped — quiet data loss with a successful insert
-// return. Pre-flight per-row count check now rejects extras up front.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -31,7 +26,6 @@ foreach ($probes as $label => [$cols, $vals]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: well-formed rows still land cleanly.
 $c->insert("test.shape", ["a","b"], [[10, 20], [11, 21]]);
 $cnt = $c->select("SELECT count() FROM test.shape", [], ClickHouse::FETCH_ONE);
 echo "rowcount: $cnt\n";

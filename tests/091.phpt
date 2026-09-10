@@ -8,13 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// ClickHouse inserts are not transactional. A streaming insert that is
-// abandoned without writeEnd() (script bailout, exception unwind, unset())
-// is wound down by ~Client, which finalizes whatever the server accepted on
-// the existing wire. The destructor does NOT reconnect-to-discard: that only
-// ever dropped inserts small enough to still sit in the server squash buffer,
-// so it was size-dependent and silently partial. Callers needing exactly-once
-// must use explicit insert deduplication, not handle teardown.
+// Teardown finalizes orphaned inserts; reconnecting cannot reliably discard streamed blocks.
 
 $cfg = clickhouse_test_config();
 $c = new ClickHouse($cfg);
@@ -41,7 +35,6 @@ unset($c3);
 $cnt = $c->select("SELECT count() FROM test.destruct_finalize", [], ClickHouse::FETCH_ONE);
 echo "after clean unset: $cnt\n";
 
-// Sanity: a complete cycle on a fresh handle still lands as expected.
 $c4 = new ClickHouse($cfg);
 $c4->writeStart("test.destruct_finalize", ["id"]);
 $c4->write([[10], [20], [30]]);

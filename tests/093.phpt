@@ -8,13 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-15-followup CR-001: Round 15 dropped the
-// positional copy in insertAssoc() but kept only a key-count check
-// for later rows. The shared column gatherer tries integer-index
-// lookup before name lookup, so a later row like `[0 => 99, "b" => 4]`
-// silently landed `99` into column `a`. insertAssoc()'s contract is
-// associative-only with a key set fixed by the first row; every row
-// must have the same string-key set as the first row.
+// The gatherer tries integer indexes before names; integer keys could misroute values.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -47,9 +41,6 @@ foreach ($probes as $label => $rows) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: well-formed assoc rows still land — including with keys in
-// a different order than the first row (assoc means by name, not
-// position, so different ordering must continue to work).
 $c->insertAssoc("test.assoc_shape", [
     ["a" => 10, "b" => 20],
     ["b" => 21, "a" => 11],

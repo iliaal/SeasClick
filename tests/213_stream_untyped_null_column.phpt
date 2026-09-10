@@ -10,10 +10,7 @@ memory_limit=128M
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-/* A finite memory_limit is what arms the selectStream retained-bytes guard.
- * Its per-column estimator serializes unrecognised column types, and
- * ColumnNothing::SaveBody throws, so an untyped NULL used to abort the
- * stream under every php-fpm default. */
+/* A finite memory_limit enables byte estimation, which must not serialize ColumnNothing. */
 $c = new ClickHouse(clickhouse_test_config());
 
 $queries = array(
@@ -34,7 +31,6 @@ foreach ($queries as $label => $sql) {
     }
 }
 
-/* The guard itself must still fire on a genuinely oversized buffer. */
 try {
     foreach ($c->selectStream(
         "SELECT repeat('x', 100000) AS s FROM numbers(20000)"

@@ -8,9 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// The UUID parser skipped a '-' at any position, silently canonicalizing
-// malformed text instead of rejecting it. It now accepts only 32 hex digits
-// (dashless) or the 8-4-4-4-12 dashed form.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -26,10 +23,8 @@ function try_insert($c, $label, $u) {
     }
 }
 
-// canonical forms accepted
 try_insert($c, "dashed",   "61f0c404-5cb3-11e7-907b-a6006ad3dba0");
 try_insert($c, "dashless", "61f0c4045cb311e7907ba6006ad3dba0");
-// malformed rejected
 try_insert($c, "misplaced-dash", "61f0-c404-5cb3-11e7-907b-a6006ad3dba0");
 try_insert($c, "too-short",      "61f0c404");
 try_insert($c, "non-hex",        "zzzzzzzz-5cb3-11e7-907b-a6006ad3dba0");

@@ -10,9 +10,7 @@ require __DIR__ . "/_clickhouse.inc";
 
 $ch = new ClickHouse(clickhouse_test_config());
 
-/* An empty key is the wire-level terminator of the native-protocol
- * settings section; a numeric key was silently dropped. Both must be
- * rejected before they reach the wire, matching setSettings(). */
+/* An empty setting key terminates the native-protocol settings section. */
 try {
     $ch->execute("SELECT 1", [], "", ["" => "1"]);
     echo "empty key: no throw\n";
@@ -27,8 +25,6 @@ try {
     echo "numeric key: ", (strpos($e->getMessage(), "must be strings") !== false ? "rejected" : "other"), "\n";
 }
 
-/* A well-formed per-call setting still applies.
- * select($sql, $params, $fetch_mode, $query_id, $settings). */
 var_dump($ch->select("SELECT 1 AS x", [], 0, "", ["max_block_size" => "100"])[0]["x"]);
 ?>
 --EXPECT--

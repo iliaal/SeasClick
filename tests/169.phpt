@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// selectStatement() used to hardcode fetch_mode = 0, so a Statement user
-// (smi2-style) could not request DATE_AS_STRINGS / UUID_WITH_DASHES etc.
-// It now accepts an optional trailing $fetch_mode; value flags apply while
-// row-shape flags (FETCH_ONE/KEY_PAIR/COLUMN) are ignored (a Statement
-// always materializes full rows for array/iterator access).
 
 $c = new ClickHouse(clickhouse_test_config());
 

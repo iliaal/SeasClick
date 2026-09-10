@@ -8,12 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-001: writeStart() opens an insert that holds the wire
-// in insert mode for the whole writeStart..writeEnd span, but query_active
-// is only set for the duration of each individual call. ping() therefore
-// used to reach the vendored client mid-insert and surface its cryptic
-// "cannot execute query" error. Reject it up front with the same message
-// every other query path uses, and prove the insert is unaffected.
+// The wire remains in insert mode between calls, while query_active does not.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -29,14 +24,12 @@ try {
     echo "ping: ", $e->getMessage(), "\n";
 }
 
-// The streaming insert must still be intact and completable.
 $c->write([[1], [2], [3]]);
 $c->writeEnd();
 
 $n = $c->select("SELECT count() FROM test.cr155", [], ClickHouse::FETCH_ONE);
 echo "rows: $n\n";
 
-// ping() works normally once the insert is closed.
 var_dump($c->ping());
 
 $c->execute("DROP TABLE test.cr155");

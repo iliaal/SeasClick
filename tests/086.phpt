@@ -8,14 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-11-followup CR-002: UInt64 values above
-// ZEND_LONG_MAX (2^63-1) used to surface as negative PHP integers
-// because the read path cast through (zend_long), losing the
-// unsigned semantics. For Map(UInt64, *) keys this also collapsed
-// distinct unsigned values into the same PHP-signed key. Now the
-// scalar / Map-key / Map-value read paths emit a decimal string
-// for any UInt64 > ZEND_LONG_MAX. Smaller values continue to
-// surface as PHP int.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");

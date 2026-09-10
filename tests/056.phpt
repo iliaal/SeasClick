@@ -25,19 +25,16 @@ echo "select_start=", ($tally["select_start"] ?? 0) >= 1 ? "yes" : "no", "\n";
 echo "data_block=", ($tally["data_block"] ?? 0) >= 1 ? "yes" : "no", "\n";
 echo "select_finish=", ($tally["select_finish"] ?? 0) >= 1 ? "yes" : "no", "\n";
 
-// Execute path: emits execute_start + execute_finish, no data_block.
 $tally = [];
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 echo "execute_start=", ($tally["execute_start"] ?? 0), "\n";
 echo "execute_finish=", ($tally["execute_finish"] ?? 0), "\n";
 echo "execute_data_block=", ($tally["data_block"] ?? 0), "\n";
 
-// Server exception fires server_exception.
 $tally = [];
 try { $c->execute("THIS IS NOT VALID SQL"); } catch (ClickHouseException $e) {}
 echo "server_exception=", ($tally["server_exception"] ?? 0) >= 1 ? "yes" : "no", "\n";
 
-// Disable: no further events.
 $tally = [];
 $c->setVerbose(false);
 $c->select("SELECT 1");
@@ -52,7 +49,6 @@ $c->select("SELECT 1");
 $c->setVerbose(false);
 echo "stderr_mode_ok=yes\n";
 
-// Reject non-bool, non-null, non-callable.
 try {
     $c->setVerbose(42);
     echo "int_arg: NO EXCEPTION (BUG)\n";
@@ -60,10 +56,6 @@ try {
     echo "int_arg rejected: ", $e->getMessage(), "\n";
 }
 
-// null is accepted as a synonym for false, matching the ?callable
-// signature of setProgressCallback / setProfileCallback. The previous
-// version threw on null, which surprised callers using the obvious
-// "remove the sink" idiom.
 $tally = [];
 $c->setVerbose(function(string $event, array $ctx) use (&$tally) {
     $tally[$event] = 1;

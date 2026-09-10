@@ -8,14 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// --- CR-001: stream-read failure must not commit partial data -----------
-//
-// Userland wrapper whose second read returns false (the PHP convention
-// for "could not read"). Pre-fix, insertFromStream treated the false
-// return as EOF and EndInsert() committed whatever had been parsed up
-// to the failure — partial rows from a transient read error landed in
-// the table silently. Post-fix, the read error throws and the existing
-// catch path resets the connection before any data crosses the wire.
 
 class FailAfterFirstReadStream {
     public $context;
@@ -57,12 +49,9 @@ try {
 }
 fclose($fh);
 
-// Crucial assertion: nothing committed. Pre-fix this printed 1.
 $cnt = $c->select("SELECT count() FROM test.read_err", [], ClickHouse::FETCH_ONE);
 echo "cr001 rowcount after failed read: $cnt\n";
 
-// Same wrapper variant that returns 0 without setting EOF — caught by
-// the second branch of the new read-loop check.
 class ZeroWithoutEofStream {
     public $context;
     private int $reads = 0;
@@ -89,7 +78,6 @@ fclose($fh);
 $cnt = $c->select("SELECT count() FROM test.read_err", [], ClickHouse::FETCH_ONE);
 echo "cr001 rowcount after zero-noeof: $cnt\n";
 
-// Sanity: a healthy stream after the failures still works.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\tclean\n2\trow\n");
 rewind($mem);
@@ -97,14 +85,7 @@ $n = $c->insertFromStream("test.read_err", ["id", "s"], $mem);
 fclose($mem);
 echo "cr001 clean rows: $n\n";
 
-// --- CR-002: empty external-table rows must be rejected ----------------
-//
-// clickhouse-cpp deliberately skips zero-row external blocks because
-// the native protocol uses an empty block as the end-of-stream marker.
-// Pre-fix, an empty `rows => []` external slipped past validation and
-// the query failed server-side with the misleading "Unknown expression
-// or table expression identifier ext_..." error. Reject upfront with a
-// message that points to the userland workaround.
+// Empty native blocks terminate external data; the server never sees an empty named table.
 
 $c->execute("DROP TABLE IF EXISTS test.ext_empty");
 $c->execute("CREATE TABLE test.ext_empty (id UInt32) ENGINE=Memory");
@@ -117,10 +98,6 @@ try {
     );
     echo "cr002-empty: NO THROW\n";
 } catch (ClickHouseException $e) {
-    // Distinguish the new client-side rejection from the pre-fix
-    // server-side "Unknown expression or table expression identifier"
-    // path, which also threw but only because the server gave up after
-    // the lib silently skipped the empty named block.
     $msg = $e->getMessage();
     if (strpos($msg, "has no rows") !== false) {
         echo "cr002-empty: REJECTED-CLIENT\n";
@@ -132,7 +109,6 @@ try {
     }
 }
 
-// Sanity: non-empty external still works on the same handle.
 $rows = $c->selectWithExternalData(
     "SELECT id FROM test.ext_empty WHERE id IN ext_ids ORDER BY id",
     [["name" => "ext_ids", "columns" => ["id" => "UInt32"], "rows" => [[1], [3]]]],

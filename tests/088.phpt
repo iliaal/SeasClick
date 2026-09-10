@@ -8,13 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-12-followup CR-001: write() used to derive
-// columns_count from the first row, so a row narrower than the
-// writeStart() declaration silently sent a partial block. The server
-// then materialized the missing columns from their defaults and the
-// caller saw a successful write of truncated data. write() now uses
-// the BeginInsert block's column count as the authoritative width
-// and rejects narrow rows up front.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -34,12 +27,10 @@ foreach ($probes as $label => [$rows]) {
     } catch (ClickHouseException $e) {
         echo "$label: REJECTED\n";
     }
-    // Recovery: client should be reusable for a fresh writeStart cycle.
     try { $c->execute("SELECT 1"); }
     catch (ClickHouseException $e) { echo "$label: client wedged: ", $e->getMessage(), "\n"; }
 }
 
-// Sanity: well-formed write still lands cleanly on the same handle.
 $c->writeStart("test.write_short", ["a", "b"]);
 $c->write([[10, 20], [11, 21]]);
 $c->writeEnd();

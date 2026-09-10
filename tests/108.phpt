@@ -22,7 +22,6 @@ function probe(string $label, callable $fn): void {
     }
 }
 
-// 1. `\N` as the whole cell is fine — NULL marker.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\tplain\t\\N\n");
 rewind($mem);
@@ -33,9 +32,6 @@ $r = $c->select("SELECT id, s, note IS NULL AS n FROM test.null_strict")[0];
 echo "row: {$r['id']} {$r['s']} note_null={$r['n']}\n";
 $c->execute("TRUNCATE TABLE test.null_strict");
 
-// 2. `\N` followed by other content inside the cell is REJECTED.
-//    Pre-fix, this silently became the literal 3-char string "\Nx"
-//    when the target column was String.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\t\\Nx\tnote\n");
 rewind($mem);
@@ -43,7 +39,6 @@ probe("trailing-after-N", fn() =>
     $c->insertFromStream("test.null_strict", ["id", "s", "note"], $mem));
 fclose($mem);
 
-// 3. Same in the Nullable column.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\tplain\t\\Ntrash\n");
 rewind($mem);
@@ -51,7 +46,6 @@ probe("nullable-after-N", fn() =>
     $c->insertFromStream("test.null_strict", ["id", "s", "note"], $mem));
 fclose($mem);
 
-// 4. `\N` at cell start followed by row terminator is fine.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "2\tplain\t\\N\n");
 rewind($mem);
@@ -68,10 +62,7 @@ $n = $c->insertFromStream("test.null_strict", ["id", "note", "s"], $mem);
 fclose($mem);
 echo "cell-sep-after-N rows: $n\n";
 
-// 6. `\\N` (escape `\\` decodes to one `\`, then literal `N`) is the
-//    two-character IS_STRING value `\N`, NOT the NULL marker. Pre-fix
-//    pushCell's bytes-based check could not distinguish the two cases;
-//    now the parser uses cell_is_null state to discriminate.
+// Escaped backslash + N is a literal string, distinct from the TSV NULL marker.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "4\t\\\\N\tplain\n");
 rewind($mem);
@@ -92,7 +83,6 @@ echo "csv-trailing-after-N rows: $n\n";
 $r = $c->select("SELECT s FROM test.null_strict WHERE id=5", [], ClickHouse::FETCH_ONE);
 echo "csv row 5 s=$r\n";
 
-// 8. Handle still usable after the throws above.
 $cnt = $c->select("SELECT count() FROM test.null_strict", [], ClickHouse::FETCH_ONE);
 echo "total rows: $cnt\n";
 

@@ -2,10 +2,7 @@
 #
 # Build and run the phpt suite against a 32-bit PHP.
 #
-# The CI matrix is 64-bit everywhere except the Windows x86 lane, and that
-# lane cannot reach a ClickHouse server, so every SIZEOF_ZEND_LONG < 8 branch
-# ships unexercised. This reproduces a real 32-bit run locally through an
-# i386 container.
+# Exercise server-dependent 32-bit paths absent from the Windows x86 CI lane.
 #
 #   ./scripts/run-tests-32bit.sh                 # whole suite
 #   ./scripts/run-tests-32bit.sh tests/208*.phpt # selected tests

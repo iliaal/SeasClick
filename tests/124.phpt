@@ -13,9 +13,7 @@ try {
     $ch->execute("SELECT throwIf(1, 'boom')");
     echo "no exception\n";
 } catch (ClickHouseException $e) {
-    /* Taking a reference to the public typed property turns the slot
-     * into IS_REFERENCE. Without ZVAL_DEREF the getter's type check
-     * fails and it returns 0/null instead of the held value. */
+    /* A referenced property exposes IS_REFERENCE to the native getter. */
     $codeRef = &$e->server_code;
     $nameRef = &$e->server_name;
     echo "code matches: ", ($e->getServerCode() === $e->server_code ? "yes" : "no"), "\n";

@@ -10,10 +10,6 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-// Each row: [method label, callable]. The callable is expected to throw
-// ClickHouseException with a message starting "<what> ...". We print the
-// label + the exception message so a regression on the validator surface
-// is a one-line diff.
 $probes = [
     "tableSize(empty)"                  => fn() => $c->tableSize(""),
     "tableSize(trailing dot)"           => fn() => $c->tableSize("a."),
@@ -41,10 +37,7 @@ foreach ($probes as $label => $fn) {
 $literal = $c->tableSize("test; SELECT 1");
 echo "tableSize literal special count=", count($literal), "\n";
 
-// isExists compares its arguments as string LITERALS against system.tables
-// (not as interpolated identifiers), so injection/special-char input is
-// neutralized by escaping rather than rejected: each returns a bool with no
-// SQL executed. This is the same string-literal treatment showTables() uses.
+// These helpers compare string values; special characters must be escaped, not rejected.
 $isexists_probes = [
     "isExists(SQL injection in db)"    => fn() => $c->isExists("test; DROP TABLE x", "t"),
     "isExists(SQL injection in table)" => fn() => $c->isExists("test", "t; DROP TABLE x"),
@@ -62,7 +55,6 @@ foreach ($isexists_probes as $label => $fn) {
     }
 }
 
-// Sanity: a valid identifier must NOT throw the validator.
 try {
     $c->execute("CREATE DATABASE IF NOT EXISTS test");
     $c->execute("DROP TABLE IF EXISTS test.id_ok");

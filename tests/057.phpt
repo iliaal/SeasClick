@@ -8,13 +8,9 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression: a user-supplied progress/profile callback that throws used to
-// have its exception silently overwritten by the surrounding query's own
-// throwClickHouseError. Now the user's exception is preserved end-to-end.
 
 class CallbackBoom extends \RuntimeException {}
 
-// 1) Progress callback that throws.
 $c = new ClickHouse(clickhouse_test_config());
 $c->setProgressCallback(function () {
     throw new CallbackBoom("progress aborted");
@@ -29,7 +25,6 @@ try {
 echo "progress throws: class=", $got ? get_class($got) : "(none)", "\n";
 echo "progress throws: message=", $got ? $got->getMessage() : "(none)", "\n";
 
-// 2) Profile callback that throws.
 $c2 = new ClickHouse(clickhouse_test_config());
 $c2->setProfileCallback(function () {
     throw new CallbackBoom("profile aborted");
@@ -44,10 +39,6 @@ try {
 echo "profile throws: class=", $got2 ? get_class($got2) : "(none)", "\n";
 echo "profile throws: message=", $got2 ? $got2->getMessage() : "(none)", "\n";
 
-// 3) Recovery: a callback abort leaves the wire mid-stream (clickhouse-cpp's
-//    packet loop unwound on the C++ throw without draining the rest of the
-//    server response), so callers need resetConnection() before reusing the
-//    same client. This is documented contract, not silent breakage.
 $c->setProgressCallback(null);
 $c->resetConnection();
 $res = $c->select("SELECT 1 AS one", [], ClickHouse::FETCH_ONE);

@@ -10,14 +10,7 @@ require __DIR__ . "/_clickhouse.inc";
 
 $ch = new ClickHouse(clickhouse_test_config());
 
-/* These zero-arg methods previously skipped zend_parse_parameters_none:
- * on a release build the extra arg was silently ignored, and on a debug
- * build the call aborted with an "Arginfo / zpp mismatch" fatal. They
- * must now reject the extra arg.
- *
- * PHP 8 throws ArgumentCountError; PHP 7.4 only emits a Warning and
- * returns NULL, so promote that Warning to a throw for the duration of
- * the call to keep the catch arm uniform across the matrix. */
+/* Normalize PHP 7.4 arity warnings to exceptions, matching PHP 8 behavior. */
 set_error_handler(function ($_n, $msg) { throw new RuntimeException($msg); });
 foreach (["getServerInfo", "getCurrentEndpoint", "getStatistics", "getLogQueries", "ping", "resetConnection"] as $m) {
     try {

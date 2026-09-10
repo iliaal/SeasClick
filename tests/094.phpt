@@ -8,26 +8,14 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-16-followup CR-001: the vendored client sets
-// its inserting_ flag before sending the BeginInsert query and before
-// receiving the server's schema block, so a server-side error during
-// that phase (missing table, bad column name, permissions) left the
-// flag stuck. Both insert() and writeStart() called BeginInsert
-// without recovery, so the next select/execute on the same handle
-// threw "cannot execute query while inserting" until userland called
-// resetConnection() by hand. Both call sites now ResetConnection() on
-// BeginInsert failure.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.begin_recover");
-// Drop the probe target too — a stale table left in the test DB
-// from a previous run would let BeginInsert succeed and the test
-// would assert the wrong behavior.
+// Remove stale tables so the missing-table probe cannot succeed.
 $c->execute("DROP TABLE IF EXISTS test.begin_recover_missing");
 $c->execute("CREATE TABLE test.begin_recover (id UInt32) ENGINE=Memory");
 
-// Path 1: direct insert() against a missing table.
 try {
     $c->insert("test.begin_recover_missing", ["id"], [[1]]);
     echo "direct insert missing table: NO THROW\n";
@@ -37,7 +25,6 @@ try {
 $x = $c->select("SELECT 43 AS x", [], ClickHouse::FETCH_ONE);
 echo "select after direct insert begin error: $x\n";
 
-// Path 2: writeStart() against a missing table.
 try {
     $c->writeStart("test.begin_recover_missing", ["id"]);
     echo "writeStart missing table: NO THROW\n";
@@ -47,7 +34,6 @@ try {
 $x = $c->select("SELECT 44 AS x", [], ClickHouse::FETCH_ONE);
 echo "select after writeStart begin error: $x\n";
 
-// Path 3: bad column on a real table.
 try {
     $c->writeStart("test.begin_recover", ["nonexistent_col"]);
     echo "writeStart bad column: NO THROW\n";
@@ -57,7 +43,6 @@ try {
 $x = $c->select("SELECT 45 AS x", [], ClickHouse::FETCH_ONE);
 echo "select after writeStart bad column: $x\n";
 
-// Sanity: a fresh streaming cycle on the same handle still works.
 $c->writeStart("test.begin_recover", ["id"]);
 $c->write([[10], [20]]);
 $c->writeEnd();

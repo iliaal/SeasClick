@@ -10,12 +10,7 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-/* Integer division truncates toward zero, so a negative sub-second raw
- * value split wrong: DateTime64(-0.5) rendered "1970-01-01 00:00:00.5"
- * (a second ahead) instead of flooring to "1969-12-31 23:59:59.5", and
- * Time64(-0.5) dropped its leading '-' because the whole-seconds part was
- * 0. The extension's DATE_AS_STRINGS rendering must match the server's
- * own toString(). */
+/* Negative fractions need floor division for timestamps and a raw sign for durations. */
 $mode = ClickHouse::FETCH_ONE | ClickHouse::DATE_AS_STRINGS;
 
 $dtServer = $c->select("SELECT toString(toDateTime64(-0.5, 1)) AS x", [], ClickHouse::FETCH_ONE);

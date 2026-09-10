@@ -28,14 +28,12 @@ expect_throw("missing key", function () use ($c) {
     $c->select("SELECT 1 FROM system.one", ['x' => "1"]);
 });
 
-// Safe values still work.
 $rows = $c->select("SELECT {col} FROM system.one", ['col' => 'dummy']);
 echo "safe identifier: ", isset($rows[0]['dummy']) ? "ok" : "fail", "\n";
 
 $one = $c->select("SELECT {n} AS x FROM system.one", ['n' => '42'], ClickHouse::FETCH_ONE);
 echo "safe numeric: $one\n";
 
-// Multiple occurrences of the same placeholder all replaced.
 $rows2 = $c->select("SELECT {col} AS a, {col} AS b FROM system.one", ['col' => '7']);
 echo "duplicate placeholder: ", $rows2[0]['a'], "/", $rows2[0]['b'], "\n";
 ?>

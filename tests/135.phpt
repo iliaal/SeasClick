@@ -8,12 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-/* The handler instance is referenced only by the callback array stored on
- * the client. When run() calls setProfileCallback(null), the stored array
- * is dtor'd; without pinning the callable across the call that drops the
- * last reference and destroys the handler whose method is still executing
- * (a use-after-free on $this). The destruction order makes it observable:
- * unpatched, __destruct runs before run() returns. */
+/* Unregistering drops the last stored handler reference; destruction must wait until run returns. */
 $GLOBALS['log'] = [];
 
 class ProfileHandler
@@ -40,7 +35,6 @@ $runEnd   = array_search('run-end', $GLOBALS['log'], true);
 echo "handler outlived its method: ",
     (($destruct === false || $destruct > $runEnd) ? "yes" : "no"), "\n";
 
-/* The callback unregistered itself, so a second query runs cleanly. */
 echo "rows2: ", count($ch->select("SELECT number FROM system.numbers LIMIT 10")), "\n";
 ?>
 --EXPECT--

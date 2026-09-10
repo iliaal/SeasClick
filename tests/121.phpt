@@ -12,9 +12,7 @@ $c = new ClickHouse(clickhouse_test_config());
 
 $stmt = $c->selectStatement("SELECT number AS n FROM system.numbers LIMIT 3");
 
-/* Hand the rows array out to userland, then iterate the statement.
- * The statement's cursor must not move the internal pointer of the
- * array the caller now holds. */
+/* Iterating must not move the shared rows array's internal pointer. */
 $rows = $stmt->toArray();
 $sum = 0;
 $cnt = 0;
@@ -25,14 +23,12 @@ foreach ($stmt as $r) {
 echo "iterated cnt=", $cnt, " sum=", $sum, "\n";
 echo "copy current=", json_encode(current($rows)), "\n";
 
-/* A second pass rewinds cleanly. */
 $cnt2 = 0;
 foreach ($stmt as $r) {
     $cnt2++;
 }
 echo "second pass=", $cnt2, "\n";
 
-/* jsonSerialize() shares the same array; same guarantee. */
 $json = $stmt->jsonSerialize();
 foreach ($stmt as $r) {
 }

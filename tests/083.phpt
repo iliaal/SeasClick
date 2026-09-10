@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-9-followup CR-003: to_time_t_with_frac
-// (a) silently dropped any fractional suffix when precision==0,
-// (b) accepted a bare dot ("12:34:56.") with no digits after,
-// (c) didn't validate that the first character after the dot was a
-// digit. All three combinations now throw.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -34,7 +29,6 @@ foreach ($probes as $label => [$tbl, $val]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: well-formed values still land.
 $c->insert("test.dt64_p0", ["dt"], [["2024-01-15 12:00:00"]]);
 $c->insert("test.dt64_p3", ["dt"], [["2024-01-15 12:00:00.789"]]);
 $rows0 = $c->select("SELECT toString(dt) AS dt FROM test.dt64_p0", [], ClickHouse::FETCH_ONE);

@@ -8,10 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-016: 072 only exercises the reentry guard from a row
-// callback. The same per-object QueryActiveGuard must also reject a query
-// fired from a progress, profile, or verbose sink on the same instance.
-// The outer query scans enough rows to guarantee progress/profile packets.
+// Scan enough rows to guarantee progress/profile packets.
 
 $OUTER = "SELECT count() FROM (SELECT number FROM system.numbers LIMIT 8000000)";
 
@@ -32,7 +29,6 @@ function reentry_from(callable $install): string
     };
     $install($c, $reenter);
     try { $c->select($OUTER, [], ClickHouse::FETCH_ONE); } catch (Throwable $e) {}
-    // The outer client must remain usable after the rejected reentry.
     $c->resetConnection();
     $ok = $c->select("SELECT 7", [], ClickHouse::FETCH_ONE);
     return "$verdict / recovery=$ok";

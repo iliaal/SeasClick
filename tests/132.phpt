@@ -10,9 +10,6 @@ require __DIR__ . "/_clickhouse.inc";
 
 $ch = new ClickHouse(clickhouse_test_config());
 
-/* foreach ($externals as &$e) leaves IS_REFERENCE buckets; the entry and
- * its name/columns/rows members must be dereffed before the type checks,
- * matching the insert() paths. */
 $ext = [["name" => "ext_ids", "columns" => ["id" => "UInt64"], "rows" => [[1], [2], [3]]]];
 foreach ($ext as &$e) {}
 unset($e);

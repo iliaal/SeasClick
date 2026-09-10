@@ -1,18 +1,11 @@
 #!/usr/bin/env bash
 #
-# Guards the vendored clickhouse-cpp divergence record.
-#
-# Three invariants, in increasing strength:
-#
+# Verify the patch ledger, reverse application, and pristine upstream parity:
 #   1. every patch file has a LOCAL_PATCHES.md heading, and vice versa
 #   2. the patch stack reverse-applies against the vendored tree
 #   3. what is left after the reverse-apply is pristine upstream
 #
-# (3) is the one that catches a hand-edit landing in lib/clickhouse-cpp
-# without a patch file — the failure mode that shipped the destructor
-# teardown guard undocumented. It needs the upstream sources: either set
-# CLICKHOUSE_CPP_PRISTINE to an existing checkout, or let the script clone
-# the pinned tag.
+# Set CLICKHOUSE_CPP_PRISTINE to reuse an upstream checkout; otherwise clone the pinned tag.
 #
 set -euo pipefail
 
@@ -30,8 +23,6 @@ fail() { printf 'check-vendored-patches: %s\n' "$1" >&2; exit 1; }
 mapfile -t patches < <(find "$patch_dir" -maxdepth 1 -name '*.patch' | sort)
 [ "${#patches[@]}" -gt 0 ] || fail "no patch files found in $patch_dir"
 
-# --- 1. one LOCAL_PATCHES.md heading per patch file ---------------------
-#
 # The document opens with an "Obsoleted in <version>" section for patches
 # upstream has absorbed, which deliberately has no patch file.
 doc_headings=$(grep -c '^## ' "$doc" || true)
@@ -41,19 +32,16 @@ if [ "$live_headings" -ne "${#patches[@]}" ]; then
     fail "LOCAL_PATCHES.md documents $live_headings live modification(s) but $patch_dir holds ${#patches[@]} patch file(s)"
 fi
 
-# --- manifest note should agree on the count ----------------------------
 if [ -f "$manifest" ]; then
     if ! grep -q "${#patches[@]} local patches" "$manifest"; then
         fail "$manifest note does not say '${#patches[@]} local patches'"
     fi
 fi
 
-# --- 2 + 3. reverse-apply the stack and compare with upstream -----------
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Populate from git, not the working tree: an in-tree build leaves .libs/*.o
-# and .deps/ inside lib/clickhouse-cpp, and those are not upstream sources.
+# Copy tracked sources only; in-tree build artifacts are not upstream files.
 mapfile -t tracked < <(cd "$root" && git ls-files 'lib/clickhouse-cpp/clickhouse' 'lib/clickhouse-cpp/contrib')
 [ "${#tracked[@]}" -gt 0 ] || fail "no tracked files under lib/clickhouse-cpp"
 for rel in "${tracked[@]}"; do
@@ -75,10 +63,7 @@ if [ -z "$pristine" ]; then
     [ -n "$pinned" ] && [ -n "$repo" ] || fail "cannot read pinned/repo from $manifest"
     pristine="$work/pristine"
     if ! git clone -q --depth 1 --branch "v$pinned" "https://github.com/$repo.git" "$pristine" 2>/dev/null; then
-        # Offline is a normal state on a dev box, so degrade to the two
-        # invariants that need no network. In CI it is not: silently dropping
-        # the check that catches an unpatched hand-edit is the whole failure
-        # this script exists to prevent.
+        # Local offline runs may skip pristine comparison; CI must enforce it.
         if [ -n "${CI:-}" ]; then
             fail "could not clone v$pinned to compare against pristine upstream"
         fi
@@ -88,9 +73,7 @@ if [ -z "$pristine" ]; then
     fi
 fi
 
-# Compare exactly the files the work tree was built from, which is also the
-# set the vendored copy still carries: the vendoring step trims upstream's
-# tests, benchmarks and CI.
+# Vendoring omits upstream tests, benchmarks, and CI; compare only retained files.
 for rel in "${tracked[@]}"; do
     vendored_rel="${rel#lib/clickhouse-cpp/}"
     if ! cmp -s "$work/$vendored_rel" "$pristine/$vendored_rel"; then

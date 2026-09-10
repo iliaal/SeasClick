@@ -20,31 +20,25 @@ $c->insert("test.stmt_t", ["id", "name"], [
 
 $stmt = $c->selectStatement("SELECT id, name FROM test.stmt_t ORDER BY id");
 
-// Type check
 echo "type=", get_class($stmt), "\n";
 echo "is_iterator=",     ($stmt instanceof Iterator)         ? "yes" : "no", "\n";
 echo "is_countable=",    ($stmt instanceof Countable)        ? "yes" : "no", "\n";
 echo "is_arrayaccess=",  ($stmt instanceof ArrayAccess)      ? "yes" : "no", "\n";
 echo "is_jsonser=",      ($stmt instanceof JsonSerializable) ? "yes" : "no", "\n";
 
-// Countable
 echo "count=", count($stmt), "\n";
 
-// Iterator (foreach)
 foreach ($stmt as $k => $row) {
     echo "row[", $k, "]=", $row["id"], ":", $row["name"], "\n";
 }
 
-// ArrayAccess
 echo "stmt[0]=", json_encode($stmt[0]), "\n";
 echo "stmt[2]=", json_encode($stmt[2]), "\n";
 echo "isset[1]=", isset($stmt[1]) ? "yes" : "no", "\n";
 echo "isset[99]=", isset($stmt[99]) ? "yes" : "no", "\n";
 
-// JsonSerializable
 echo "json=", json_encode($stmt), "\n";
 
-// Read-only enforcement
 try {
     $stmt[0] = ["x" => 1];
     echo "offsetSet: NO EXCEPTION (BUG)\n";
@@ -58,23 +52,18 @@ try {
     echo "offsetUnset rejected: ", $e->getMessage(), "\n";
 }
 
-// toArray() returns plain array suitable for native array_* funcs
 $arr = $stmt->toArray();
 echo "toArray_is_array=", is_array($arr) ? "yes" : "no", "\n";
 echo "names=", json_encode(array_column($arr, "name")), "\n";
 
-// statistics() returns the per-call snapshot. Should reflect the SELECT
-// not any later query on the same client.
 $stats = $stmt->statistics();
 echo "stats_has_elapsed=", isset($stats["elapsed_ms"]) ? "yes" : "no", "\n";
 echo "stats_query_id=", $stats["query_id"], "\n";
 
-// Run another query on the client; statement's stats must be unchanged.
 $c->select("SELECT 1");
 $stats2 = $stmt->statistics();
 echo "stats_immutable=", ($stats === $stats2) ? "yes" : "no", "\n";
 
-// fetchOne: single row, single col yields scalar; multi-col yields full row.
 $one = $c->selectStatement("SELECT name FROM test.stmt_t WHERE id = 2")->fetchOne();
 echo "fetchOne_scalar=", $one, "\n";
 $row = $c->selectStatement("SELECT id, name FROM test.stmt_t WHERE id = 2")->fetchOne();
@@ -82,11 +71,9 @@ echo "fetchOne_row=", json_encode($row), "\n";
 $none = $c->selectStatement("SELECT id FROM test.stmt_t WHERE id = 999")->fetchOne();
 var_dump($none);
 
-// fetchKeyPair: 2-col rows -> assoc map
 $map = $c->selectStatement("SELECT id, name FROM test.stmt_t ORDER BY id")->fetchKeyPair();
 echo "fetchKeyPair=", json_encode($map), "\n";
 
-// fetchKeyPair with <2 cols throws
 try {
     $c->selectStatement("SELECT id FROM test.stmt_t LIMIT 1")->fetchKeyPair();
     echo "fetchKeyPair: NO EXCEPTION (BUG)\n";
@@ -94,11 +81,9 @@ try {
     echo "fetchKeyPair rejected: ", $e->getMessage(), "\n";
 }
 
-// fetchColumn: flat list of first-column values
 $col = $c->selectStatement("SELECT id FROM test.stmt_t ORDER BY id")->fetchColumn();
 echo "fetchColumn=", json_encode($col), "\n";
 
-// Direct construction is rejected; new ClickHouseStatement() must throw.
 try {
     new ClickHouseStatement();
     echo "ctor: NO EXCEPTION (BUG)\n";

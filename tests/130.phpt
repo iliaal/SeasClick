@@ -13,8 +13,7 @@ $ch->execute("CREATE DATABASE IF NOT EXISTS test");
 $ch->execute("DROP TABLE IF EXISTS test.b128");
 $ch->execute("CREATE TABLE test.b128 (u UInt128, i Int128) ENGINE=Memory");
 
-/* 4e38 is a 39-digit value above 2^128; the old post-multiply overflow
- * check missed it and stored a wrapped number. It must throw. */
+/* A wrapped multiply can still exceed its input; 4e38 exposes that overflow. */
 try {
     $ch->insert("test.b128", ["u"], [["400000000000000000000000000000000000000"]]);
     echo "uint128 overflow: stored ", $ch->select("SELECT toString(u) AS u FROM test.b128")[0]["u"], "\n";
@@ -30,7 +29,6 @@ try {
     echo "int128 over: ", (strpos($e->getMessage(), "exceeds 2^127-1") !== false ? "rejected" : "other"), "\n";
 }
 
-/* The legitimate maxima still round-trip. */
 $ch->execute("TRUNCATE TABLE test.b128");
 $umax = "340282366920938463463374607431768211455"; // 2^128 - 1
 $imax = "170141183460469231731687303715884105727"; // 2^127 - 1

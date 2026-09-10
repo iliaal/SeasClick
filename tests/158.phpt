@@ -8,10 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-017: exercise each rejection branch of applyPlaceholders
-// (integer key, empty key, unterminated typed placeholder, key with no
-// matching {name} in the SQL, empty array, nested-array element, and a
-// multi-token client-side value) so a refactor cannot silently loosen one.
 
 $c = new ClickHouse(clickhouse_test_config());
 

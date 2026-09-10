@@ -11,9 +11,7 @@ require __DIR__ . "/_clickhouse.inc";
 $ch = new ClickHouse(clickhouse_test_config());
 $sql = "SELECT [number, number+1] AS k, toString(number) AS v FROM system.numbers LIMIT 3";
 
-/* An Array key column used to coerce to the literal string "Array" with
- * an E_WARNING, collapsing all rows onto a single key. Both the
- * statement path and the select FETCH_KEY_PAIR path must reject it. */
+/* Composite keys stringify to "Array", collapsing distinct rows. */
 try {
     $ch->selectStatement($sql)->fetchKeyPair();
     echo "statement: no throw\n";
@@ -28,7 +26,6 @@ try {
     echo "select: ", (strpos($e->getMessage(), "scalar key") !== false ? "rejected" : "other"), "\n";
 }
 
-/* A scalar key column still works. */
 $ok = $ch->selectStatement("SELECT number AS k, toString(number*10) AS v FROM system.numbers LIMIT 2");
 var_dump($ok->fetchKeyPair());
 ?>

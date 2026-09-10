@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// When a JsonSerializable value throws during php_json_encode, the JSON
-// insert path used to clear the pending exception and throw a generic
-// "failed to encode value to JSON". It must instead leave EG(exception)
-// set so the boundary preserves the original type and message (matching
-// the String path via ZStrGuard).
 
 class BoomSerialize implements JsonSerializable {
     #[\ReturnTypeWillChange]

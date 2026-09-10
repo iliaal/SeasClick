@@ -8,8 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-208: appendIntColumn used to silently truncate
-// inserts for Int8/Int16/UInt8/UInt16 etc. Now they throw.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -29,7 +27,6 @@ foreach ($probes as $label => [$cols, $vals]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: in-range values land successfully.
 $c->insert("test.range_t", ['i8', 'u8', 'i16', 'u16'], [[-128, 255, -32768, 65535]]);
 $rows = $c->select("SELECT i8, u8, i16, u16 FROM test.range_t");
 echo "ok rowcount: ", count($rows), "\n";

@@ -8,13 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-503: Map insert dispatch used a single i64Val /
-// u64Val extractor for every narrow column width, so Map(K, Int8) with
-// PHP value 1000 silently truncated to int8_t -24 inside ColumnInt8::
-// Append. The non-Map insert path has had per-width range checks since
-// pass 1; the Map path was missed. Same gap on the key side: numeric
-// keys parsed via strtoll were appended to ColumnInt8 keys without a
-// width check.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");

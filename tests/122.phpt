@@ -32,7 +32,6 @@ foreach ($rows2 as &$r2) {
 unset($r2);
 var_dump($c->insert("test.byref_rows", ["a", "b", "arr"], $rows2));
 
-/* Nested foreach-by-ref: the row AND every cell become references. */
 $rows3 = [[5, "v", [5, 6]]];
 foreach ($rows3 as &$r3) {
     foreach ($r3 as &$cell) {
@@ -42,7 +41,6 @@ foreach ($rows3 as &$r3) {
 unset($r3);
 var_dump($c->insert("test.byref_rows", ["a", "b", "arr"], $rows3));
 
-/* Streaming write() shares the same row validation. */
 $rows4 = [[6, "s", [7]], [7, "t", [8]]];
 foreach ($rows4 as &$r4) {
 }
@@ -51,7 +49,6 @@ $c->writeStart("test.byref_rows", ["a", "b", "arr"]);
 var_dump($c->write($rows4));
 var_dump($c->writeEnd());
 
-/* Column-name lists can be reference-wrapped too. */
 $cols = ["a", "b", "arr"];
 foreach ($cols as &$col) {
 }

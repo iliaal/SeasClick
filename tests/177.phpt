@@ -8,11 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// The array-literal is sent as a bound parameter, whose Array-from-parameter
-// string reader treats a backslash literally and closes an element on the
-// first single quote. The old backslash-escape scheme rejected "it's" and
-// doubled "c\d"; the escaper now doubles quotes (SQL style) and leaves
-// backslashes literal.
+// Bound arrays require doubled quotes and literal backslashes.
 
 $c = new ClickHouse(clickhouse_test_config());
 
@@ -23,7 +19,6 @@ foreach ($cases as $s) {
     echo bin2hex($s), " -> ", bin2hex($got), " ", ($got === $s ? "MATCH" : "DIFF"), "\n";
 }
 
-// multi-element with an embedded quote
 $r = $c->select("SELECT arrayStringConcat({p:Array(String)}, '|') AS v",
                 array("p" => array("a'b", "c")));
 echo "multi: ", $r[0]['v'], "\n";

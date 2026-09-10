@@ -33,7 +33,6 @@ expect_throw("writeStart bad table", function () use ($c) {
     $c->writeStart("test.id`drop", ["id"]);
 });
 
-// Valid forms still work.
 $c->insert("test.id_validate", ["id"], [[1], [2]]);
 $rows = $c->select("SELECT id FROM test.id_validate ORDER BY id");
 echo "rows: ", count($rows), "\n";

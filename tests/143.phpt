@@ -10,9 +10,6 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-/* selectStreamCallback attached the verbose handler to the query but
- * never emitted the start/data/finish events do_select_into emits, so a
- * verbose sink saw nothing for streamed reads. */
 $tally = [];
 $c->setVerbose(function (string $event, array $ctx) use (&$tally) {
     $tally[$event] = ($tally[$event] ?? 0) + 1;

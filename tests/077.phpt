@@ -8,13 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for FR-001: closing CR-002 by dropping `-` from the
-// whitelist still left whitespace + SQL keywords accepted, so a value
-// like "test.a ANY INNER JOIN test.secret USING tenant" landed
-// verbatim inside `FROM {tbl}` and changed query semantics. The new
-// validator parses each token structurally (numeric or identifier,
-// optionally db-qualified) and rejects internal whitespace within a
-// token. Whitespace remains valid only around commas in a list.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -42,8 +35,6 @@ foreach ($probes_reject as $label => $val) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Legitimate identifiers, numerics, and lists still pass validation
-// (and reach the server, where they may or may not be valid SQL).
 $probes_ok = [
     "identifier"        => "tbl_name",
     "db.tbl"            => "test.fr1_a",

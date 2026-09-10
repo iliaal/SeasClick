@@ -13,7 +13,6 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.from_null");
 $c->execute("CREATE TABLE test.from_null (id UInt32, note Nullable(String), v Nullable(UInt32)) ENGINE=Memory");
 
-// NULLs via literal `\N` in TSV.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\talpha\t100\n2\t\\N\t\\N\n3\tgamma\t300\n");
 rewind($mem);
@@ -27,7 +26,6 @@ foreach ($c->select("SELECT id, note, v FROM test.from_null ORDER BY id") as $r)
     echo "row {$r['id']}: $note / $v\n";
 }
 
-// Same NULL marker in CSV (literal \N, unquoted).
 $c->execute("TRUNCATE TABLE test.from_null");
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "10,delta,400\r\n20,\\N,\\N\r\n30,epsilon,600\r\n");

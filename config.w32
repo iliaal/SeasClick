@@ -7,12 +7,8 @@ if (PHP_CLICKHOUSE != "no") {
     var ext_dir = configure_module_dirname;
     var ch_root = ext_dir + "\\lib\\clickhouse-cpp";
 
-    // C++17 + zstd ASM workaround + ws2_32 for sockets. /EHsc enables C++
-    // exception unwinding (clickhouse-cpp throws across the wire layer).
-    // /DNOMINMAX suppresses the windows.h max/min macros that otherwise
-    // collide with std::numeric_limits<T>::max() inside clickhouse-cpp
-    // (array.h template specializations). /bigobj covers the object-
-    // section count blow-up from the heavily templated columns code.
+    // /EHsc enables native exception unwinding; /DNOMINMAX avoids Windows macro
+    // collisions, and /bigobj accommodates the templated columns' section count.
     ADD_FLAG("CFLAGS_CLICKHOUSE",   "/std:c++17 /EHsc /bigobj /DNOMINMAX /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
     ADD_FLAG("CXXFLAGS_CLICKHOUSE", "/std:c++17 /EHsc /bigobj /DNOMINMAX /DZSTD_DISABLE_ASM /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS");
     ADD_FLAG("LDFLAGS_CLICKHOUSE",  "ws2_32.lib");
@@ -50,7 +46,6 @@ if (PHP_CLICKHOUSE != "no") {
     ADD_SOURCES(ch_root + "\\clickhouse\\columns",   "array.cpp bool.cpp column.cpp date.cpp decimal.cpp enum.cpp factory.cpp geo.cpp ip4.cpp ip6.cpp itemview.cpp json.cpp lowcardinality.cpp map.cpp nullable.cpp numeric.cpp string.cpp time.cpp tuple.cpp uuid.cpp",                                                              "clickhouse");
     ADD_SOURCES(ch_root + "\\clickhouse\\types",     "type_parser.cpp types.cpp",                                                                                                                                                                                                                                   "clickhouse");
 
-    // Vendored dependencies (pure C/C++; built into the same module).
     ADD_SOURCES(ch_root + "\\contrib\\absl\\absl\\numeric", "int128.cc", "clickhouse");
     ADD_SOURCES(ch_root + "\\contrib\\cityhash\\cityhash", "city.cc", "clickhouse");
     ADD_SOURCES(ch_root + "\\contrib\\lz4\\lz4",           "lz4.c lz4hc.c", "clickhouse");

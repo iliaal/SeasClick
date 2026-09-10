@@ -8,13 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-12-followup CR-003: scalar UInt64 inserts
-// accepted hex strings ("0xFFFF...") for upper-half values but not
-// decimal strings, and Map(*, UInt64) values rejected both forms —
-// strict_zval_long capped at ZEND_LONG_MAX. The new strict_zval_u64
-// parser handles long, decimal string, and hex string with the same
-// full-consumption discipline strict_zval_long uses, and is shared
-// across the scalar and Map UInt64 insert paths.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -36,7 +29,6 @@ foreach ($rows as $r) echo "scalar: ", (string)$r['u'], "\n";
 $expectInt = PHP_INT_SIZE > 4;
 var_dump(is_int($rows[2]['u']) === $expectInt);
 
-// Bad scalar inputs still reject.
 $bad = [
     "negative long"     => [-1],
     "negative decimal"  => ["-1"],
@@ -51,7 +43,6 @@ foreach ($bad as $label => $vals) {
     catch (ClickHouseException $e) { echo "scalar bad $label: REJECTED\n"; }
 }
 
-// Map(String, UInt64): values as long, decimal string, hex string.
 $c->insert("test.u64m", ["m"], [[[
     "a" => $i63,
     "b" => "18446744073709551615",
@@ -63,7 +54,6 @@ ksort($row['m']);
 foreach ($row['m'] as $k => $v) echo "map[$k]: ", (string)$v, "\n";
 var_dump(is_int($row['m']['a']) === $expectInt);
 
-// Map bad inputs still reject.
 try { $c->insert("test.u64m", ["m"], [[["x" => -1]]]); echo "map negative: NO THROW\n"; }
 catch (ClickHouseException $e) { echo "map negative: REJECTED\n"; }
 try { $c->insert("test.u64m", ["m"], [[["x" => "not-a-number"]]]); echo "map junk: NO THROW\n"; }

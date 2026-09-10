@@ -18,19 +18,9 @@
 #include <string>
 #include <stdexcept>
 
-/*
- * RAII wrapper for the zend_string returned by zval_get_string. Used at
- * PHP-to-C boundaries where the surrounding code can throw without
- * forcing every site to write try { ... } catch { release; throw; }.
- *
- * A throwing __toString() makes zval_get_string return "" with
- * EG(exception) set; the constructor turns that into a C++ throw so the
- * boundary catch routes to throwClickHouseError (which preserves the
- * pending PHP exception) instead of silently using the corrupted "".
- * On that failure zval_get_string returns the interned empty string, so
- * skipping the release the throw-bypassed destructor would have done is
- * harmless.
- */
+/* Own zval_get_string output across C++ exceptions. A throwing __toString
+ * returns an interned empty string; raise a sentinel C++ exception while
+ * preserving EG(exception) for the PHP boundary. */
 struct ZStrGuard {
     zend_string *s;
     explicit ZStrGuard(zval *zv) : s(zval_get_string(zv)) {
@@ -45,11 +35,8 @@ struct ZStrGuard {
     size_t      len() const { return ZSTR_LEN(s); }
 };
 
-/* DR-008: reset the thread-local allow-null strictness and convert_depth
- * at each top-level insert entrypoint so a userland-reentrant insert on a
- * second client can't inherit a first client's relaxed (Nullable-build)
- * state or elevated nest depth. Saves/restores to keep legitimate
- * same-thread nesting correct. */
+/* Isolate top-level inserts from another client's reentrant NULL/depth state;
+ * restore outer state on scope exit. */
 struct InsertConversionScopeGuard {
     int saved_null;
     int saved_depth;
@@ -79,16 +66,11 @@ void convertToZval(zval *arr, const clickhouse::ColumnRef& columnRef, int row,
 void zvalToBlock(clickhouse::Block& blockDes, clickhouse::Block& blockSrc,
                  zend_ulong num_key, zval *value_zval);
 
-/* Shared insert-path row-cell extraction (positional then name fallback,
- * with by-ref deref + arity/shape validation). Used by both the transpose
- * builder and the fused builder so the rules can't drift. */
+/* Positional lookup, then name fallback; validates row shape and dereferences cells. */
 zval *extractRowCell(zval *row_pz, size_t col_index,
                      const std::vector<zend_string*> *col_names);
 
-/* PERF-004: build a fused-eligible numeric column directly from the
- * row-major input (rows_ht = the $values matrix), skipping the per-column
- * transpose array. Returns nullptr for any type not fused, so the caller
- * falls back to the buildSingleColumnZval + insertColumn path. */
+/* Build without transposing; nullptr requests the caller's transpose fallback. */
 clickhouse::ColumnRef tryBuildScalarColumnFromRows(
     HashTable *rows_ht, size_t col_index,
     const std::vector<zend_string*> *col_names, clickhouse::TypeRef type);

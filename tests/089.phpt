@@ -8,14 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// ClickHouse inserts are not transactional. When a later write() throws
-// during row conversion, the wire is still healthy and earlier blocks have
-// already been streamed, so the catch path finalizes the insert (EndInsert)
-// rather than reconnecting to fake a rollback. The earlier blocks commit;
-// only the rejected row is dropped. The handle stays usable either way. This
-// matches the destructor's finalize-on-teardown policy. A genuinely dirty
-// wire (SendInsertBlock itself throwing mid-frame) still ResetConnection()s,
-// but that is handle recovery, not rollback.
+// ClickHouse cannot roll back streamed blocks; conversion failure finalizes earlier writes.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");

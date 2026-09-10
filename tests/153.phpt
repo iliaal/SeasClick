@@ -17,8 +17,6 @@ function probe(string $label, callable $fn): void {
     }
 }
 
-/* send_timeout_ms / receive_timeout_ms are accepted at construction and the
- * client stays usable. */
 $cfg = clickhouse_test_config();
 $cfg["send_timeout_ms"] = 5000;
 $cfg["receive_timeout_ms"] = 5000;

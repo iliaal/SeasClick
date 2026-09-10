@@ -8,12 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// insertFromStream reset the connection whenever any row had been parsed
-// (block_dirty || total_rows > 0), even when no data block had actually been
-// sent to the open insert. A bad stream row thus dropped session-scoped
-// state (temp tables, SET). The reset is now keyed on whether a block was
-// actually transmitted, so a pre-flush validation error closes the empty
-// insert cleanly and leaves the session intact.
+// A parser failure before any flush must preserve session state.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -36,7 +31,6 @@ try {
 }
 fclose($stream);
 
-// The temp table must survive (no reconnect happened).
 try {
     $r = $c->select("SELECT n FROM dr005s_tmp");
     echo "temp table survives: ", json_encode(array_column($r, 'n')), "\n";
@@ -44,7 +38,6 @@ try {
     echo "temp table GONE (reconnected)\n";
 }
 
-// Handle still usable.
 $r = $c->select("SELECT 1 AS ok");
 echo "handle usable: ", $r[0]['ok'], "\n";
 

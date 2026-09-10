@@ -8,15 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-004: std::get_time stops at the first non-matching
-// character without raising failbit, so "2024-01-01abc" parsed as
-// 2024-01-01. timegm normalizes invalid dates silently, so "2024-02-30"
-// became 2024-03-01. The DateTime64 fractional path stopped reading
-// fractional digits without rejecting trailing junk, so
-// "2024-01-01 00:00:00.123abc" silently dropped the abc.
-// Now: peek() must hit EOF after the format, gmtime round-trip must
-// match, and the fractional path requires no characters after the
-// digits.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -40,7 +31,6 @@ foreach ($probes as $label => [$cols, $vals]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: well-formed values still round-trip.
 $c->insert("test.dt_strict", ['d', 'dt', 'dt64'],
     [['2024-01-15', '2024-01-15 12:34:56', '2024-01-15 12:34:56.789']]);
 $rows = $c->select("SELECT toString(d) AS d, toString(dt) AS dt, toString(dt64) AS dt64 FROM test.dt_strict");

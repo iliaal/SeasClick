@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for FR-005: insertAssoc derived col_order from the first
-// row but only checked for missing keys on later rows. An extra key
-// silently dropped its value. The method's documented contract says
-// all rows must share the same key set, so the runtime now enforces
-// it: row count check + per-key membership.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -38,7 +33,6 @@ foreach ($probes as $label => $rows) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: matching key sets land cleanly.
 $c->insertAssoc("test.fr5_ia", [
     ["a" => 10, "b" => 20],
     ["a" => 11, "b" => 21],

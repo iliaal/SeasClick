@@ -36,16 +36,7 @@ extern "C" {
 using namespace clickhouse;
 using namespace std;
 
-/*
- * Append a completed-query record to the per-client log if logging is
- * enabled. Pulls elapsed_ms / rows_read / bytes_read from the just-
- * populated stats. No-op when logging is off so the hot path stays
- * cheap on production deployments.
- */
-/* Cap on retained QueryLog entries before getLogQueries() is called to
- * drain. A long-running PHP-FPM worker with logging on otherwise grows
- * the vector unboundedly (each entry holds two arbitrary-length strings).
- * When the cap is reached we drop the oldest in-place. */
+/* Bound retained memory even when getLogQueries() never drains the log. */
 #define CLICKHOUSE_QUERY_LOG_MAX 1024
 #define CLICKHOUSE_QUERY_LOG_STRING_MAX_BYTES 8192
 
@@ -62,13 +53,8 @@ std::string queryLogString(const std::string &value)
     return out;
 }
 
-/*
- * Redact single-quoted string literals in SQL retained for the query log
- * and verbose trace. Logged SQL keeps its shape (keywords, identifiers,
- * placeholders) but not bound secrets: '...' becomes '?', honoring ''
- * and backslash escapes; an unterminated literal redacts to end of input.
- * Exception messages keep their existing sanitizeError handling as-is.
- */
+/* Honor doubled quotes and backslash escapes; redact unterminated literals
+ * through end of input. Used for logs and traces, never wire SQL. */
 std::string redactSqlLiterals(const std::string &sql)
 {
     std::string out;
@@ -107,8 +93,6 @@ void appendQueryLogCapped(clickhouse_object *obj, QueryLog &&ql)
     obj->query_log.push_back(std::move(ql));
 }
 
-/* Build the QueryLog row shared by success and error paths. Caller fills
- * error_code / error_message for the error variant. */
 QueryLog buildQueryLog(const clickhouse_object *obj,
                        const std::string &sql, const std::string &qid)
 {
@@ -124,9 +108,6 @@ QueryLog buildQueryLog(const clickhouse_object *obj,
 void recordQuerySuccess(clickhouse_object *obj, const std::string &sql, const std::string &qid)
 {
     if (!obj->log_enabled) return;
-    /* Never let a nested allocation failure here escape the wrapper. The caller
-     * may already be inside a catch-block (recording the previous error); a
-     * second uncaught exception would call std::terminate. */
     try {
         appendQueryLogCapped(obj, buildQueryLog(obj, sql, qid));
     } catch (...) { /* swallow; logging is best-effort */ }

@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-004: the verbose "server_exception" event emitted the
-// raw server display_text, which embeds the executing SQL (and any bound
-// literals in it). throwClickHouseError() strips that tail at the
-// "while executing" marker; the verbose path must do the same so a trace
-// sink does not leak what the exception itself hides.
 
 $c = new ClickHouse(clickhouse_test_config());
 

@@ -8,10 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Nested Array/Tuple reads used to hardcode fetch_mode = 0 for their
-// elements, so DATE_AS_STRINGS / UUID_WITH_DASHES (and JSON_AS_*,
-// FIXEDSTRING_BINARY) were honored at the top level but silently dropped
-// one level down. They must now propagate to nested cells.
 
 $c = new ClickHouse(clickhouse_test_config());
 

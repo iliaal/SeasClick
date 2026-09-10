@@ -67,10 +67,7 @@ check_linux_glibc() {
 	fi
 	printf 'GLIBC baseline: required=%s maximum=%s\n' "${required}" "${maximum}"
 
-	# libstdc++ is the more likely ceiling for a C++17 extension, and its
-	# symbol versions are independent of glibc's. Report them so a bump in
-	# either runtime is visible; GLIBCXX_3.4.30 ships with GCC 12 (Ubuntu
-	# 22.04), which is the same baseline the GLIBC ceiling encodes.
+	# Check libstdc++ independently of glibc; GLIBCXX_3.4.30 is the GCC 12 ceiling.
 	local cxx_required
 	for prefix in GLIBCXX CXXABI; do
 		cxx_required=$(highest_symbol_version "${prefix}" "${binary}")

@@ -1,6 +1,3 @@
-dnl $Id$
-dnl config.m4 for extension clickhouse
-
 PHP_ARG_ENABLE(clickhouse, whether to enable ClickHouse support,
 [  --enable-clickhouse           Enable ClickHouse client support])
 
@@ -16,11 +13,6 @@ if test "$PHP_CLICKHOUSE" != "no"; then
 
   CLICKHOUSE_SSL_SRC=""
   if test "$PHP_CLICKHOUSE_OPENSSL" != "no"; then
-    dnl Validate the OpenSSL header and libraries before wiring up the TLS
-    dnl build, so --enable-clickhouse-openssl fails with a clear message
-    dnl rather than an opaque "openssl/ssl.h: No such file" when compiling
-    dnl sslsocket.cpp. The Windows config.w32 already does CHECK_LIB /
-    dnl CHECK_HEADER for this.
     AC_CHECK_HEADER([openssl/ssl.h], [], [
       AC_MSG_ERROR([--enable-clickhouse-openssl was requested but openssl/ssl.h was not found. Install the OpenSSL development package (e.g. libssl-dev / openssl-devel) or drop the flag.])
     ])

@@ -10,11 +10,6 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-/* A placeholder value passed by reference arrives as an IS_REFERENCE
- * bucket. Without a deref, the IS_NULL shortcut and the IS_ARRAY shape
- * branch both miss: a by-ref null was formatted as an empty string
- * instead of routed to the server NULL sentinel, and a by-ref array was
- * stringified ("Array to string") instead of formatted as a list. */
 
 $n = null;
 $pn = ["v" => &$n];

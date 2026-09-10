@@ -13,23 +13,7 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.boundary");
 $c->execute("CREATE TABLE test.boundary (id UInt32, s String) ENGINE=Memory");
 
-// --- SS-001: TSV escape straddling the 64 KiB read boundary -------------
-//
-// Pre-fix, the parser pushed the `\` literally when its lookahead fell
-// off the end of a feed() chunk, then the next chunk's first byte was
-// treated as ordinary content. A `\t` escape split across the 65 536-
-// byte boundary silently parsed as the two-character literal "\t"
-// instead of TAB.
-//
-// Layout chosen so the escape's `\` lands at offset 65 535:
-//   offset 0       : '1'
-//   offset 1       : TAB (cell separator)
-//   offset 2..65534: 65 533 'a' bytes  (padding inside the String cell)
-//   offset 65535   : '\' (escape opener)
-//   offset 65536   : 't' (escape body — first byte of the next chunk)
-//   offset 65537+  : 'after\n'
-//
-// Decoded cell value: 65 533 'a' bytes + TAB + "after".
+// Place the escape opener at offset 65535 and its body in the next 64 KiB chunk.
 $pad = str_repeat('a', 65533);
 $payload = "1\t" . $pad . "\\tafter\n";
 assert(strlen($payload) >= 65538);
@@ -47,13 +31,7 @@ $r = $full[0];
 echo "len={$r['len']} tab_pos={$r['tab_pos']} around=" .
      strtr($r['around'], ["\t" => "<TAB>"]) . "\n";
 
-// --- SS-002: do_select_into resets the connection on mid-callback throw --
-//
-// FETCH_KEY_PAIR throws "Key pair mode requires at least 2 columns" from
-// inside the OnData lambda when the result has one column. Pre-fix, the
-// throw left clickhouse-cpp with residual blocks on the wire and the
-// next query on the same handle saw corrupted data. The fix wraps the
-// dispatch with ResetConnection().
+// FETCH_KEY_PAIR fails inside OnData, leaving unread packets that require reset.
 $c->execute("INSERT INTO test.boundary VALUES (10, 'after-throw')");
 try {
     $c->select("SELECT id FROM test.boundary", [], ClickHouse::FETCH_KEY_PAIR);
@@ -61,12 +39,9 @@ try {
 } catch (ClickHouseException $e) {
     echo "key-pair-1col: REJECTED\n";
 }
-// Same handle, plain query — must succeed cleanly.
 $cnt = $c->select("SELECT count() FROM test.boundary", [], ClickHouse::FETCH_ONE);
 echo "rowcount after throw: $cnt\n";
 
-// And via selectWithExternalData (which routes through the same
-// do_select_into path with externals attached).
 try {
     $c->selectWithExternalData(
         "SELECT id FROM test.boundary WHERE id IN ext_ids",

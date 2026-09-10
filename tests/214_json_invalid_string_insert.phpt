@@ -19,9 +19,7 @@ $c->setSettings([
 $c->execute("DROP TABLE IF EXISTS test.json_bad_str");
 $c->execute("CREATE TABLE test.json_bad_str (j JSON) ENGINE = Memory");
 
-// Pre-fix, on PHP < 8.3 this path reached php_json_decode() FAILURE and ran
-// zval_ptr_dtor() over an UNINITIALIZED stack zval (php_json_decode does not
-// touch its output on failure). It must throw cleanly on every PHP version.
+// PHP < 8.3 uses json_decode, which leaves its output untouched on failure.
 try {
     $c->insert('test.json_bad_str', ['j'], [['{not json']]);
     echo "NO EXCEPTION\n";
@@ -29,16 +27,11 @@ try {
     echo "THROWS: ", strpos($e->getMessage(), "not valid JSON") !== false ? "clean" : $e->getMessage(), "\n";
 }
 
-// A valid JSON object string still inserts; reads surface the raw string.
 $c->insert('test.json_bad_str', ['j'], [['{"a":1}']]);
 $rows = $c->select("SELECT j FROM test.json_bad_str");
 echo "isstr=", is_string($rows[0]["j"]) ? 1 : 0, " ", $rows[0]["j"], "\n";
 
-// Read-path decode coverage: JSON_AS_ARRAY decodes the stored value. (A
-// decode-FAILURE probe is intentionally absent: the C++ "JSON read: failed
-// to decode" throw only fires when the server emits bytes the JSON scanner
-// rejects, and a well-behaved server only ever emits canonical JSON for a
-// JSON column -- unreachable in phpt without a MITM/corrupt server.)
+// A valid server JSON column cannot exercise decode failure without a corrupt peer.
 $dec = $c->select("SELECT j FROM test.json_bad_str", [], ClickHouse::JSON_AS_ARRAY);
 echo "isarr=", is_array($dec[0]["j"]) ? 1 : 0, " a=", $dec[0]["j"]["a"], "\n";
 

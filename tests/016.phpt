@@ -13,9 +13,6 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.date32_t");
 $c->execute("CREATE TABLE test.date32_t (id UInt32, d Date32) ENGINE = Memory");
 
-// Pass epoch seconds (int) only; "Y-m-d" string input goes through
-// mktime which is host-TZ-dependent and would make the test flaky
-// across CI runners and dev hosts.
 $c->insert("test.date32_t", ["id", "d"], [
     [1, 1745539200],   // 2025-04-25 UTC
     [2, 0],            // 1970-01-01 UTC

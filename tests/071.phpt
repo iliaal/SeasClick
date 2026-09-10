@@ -8,13 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-508: appendUIntColumnWithHex's full-consumption
-// check used `*endp != '\0'`, so a PHP zend_string with embedded NUL
-// followed by junk ("0xABCD\0garbage") slipped through — strtoul stops
-// at the NUL, endp points to the NUL, the *endp == '\0' check passed
-// and the trailing garbage was silently dropped. Same NUL-byte trap
-// CR-306 fixed for Map keys: compare consumed length against
-// ZSTR_LEN, not against the C-string terminator.
+// Embedded NULs must not hide trailing bytes from length-based validation.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -31,7 +25,6 @@ foreach ($probes as $label => [$cols, $vals]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: well-formed hex literals still land.
 $c->insert("test.hex_nul_t", ['u32', 'u64'], [["0xABCD", "0xDEADBEEFCAFEBABE"]]);
 $rows = $c->select("SELECT u32, toString(u64) AS u64s FROM test.hex_nul_t");
 echo "ok rowcount: ", count($rows), "\n";

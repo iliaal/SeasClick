@@ -13,9 +13,6 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.write_empty");
 $c->execute("CREATE TABLE test.write_empty (id UInt32) ENGINE=Memory");
 
-/* An empty rows array means "append nothing" -- it must be a no-op. The
- * old code threw on an empty batch, and the catch path tore down the
- * in-flight insert over a benign empty write. */
 $c->writeStart("test.write_empty", ["id"]);
 $c->write([[1], [2]]);
 $c->write([]);            // no-op; must not discard the rows above

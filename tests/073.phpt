@@ -8,11 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-002: the prior whitelist allowed `-`, so the value
-// "test.review_inject --" landed verbatim and the trailing predicate
-// got commented out. Baseline returned 1 (tenant=1), placeholder returned
-// 2 (entire table). Same shape as the SQL injection patterns the
-// {name:Type} typed-parameter form exists to prevent.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -38,7 +33,6 @@ try {
     echo "comment injection: REJECTED\n";
 }
 
-// Single-dash also rejected (was ALLOWED in earlier rounds).
 try {
     $c->select("SELECT {x} AS r", ["x" => "neg-name"]);
     echo "single dash: NO THROW\n";

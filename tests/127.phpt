@@ -12,11 +12,6 @@ $boot = new ClickHouse(clickhouse_test_config());
 $boot->execute("CREATE DATABASE IF NOT EXISTS test");
 $boot->execute("CREATE DATABASE IF NOT EXISTS sc_db127");
 
-/* Construct against a non-default database, switch to "default", then
- * reconnect. The session must remain in "default": the reconnect used
- * to fall back to the constructor-time database (sc_db127) while the
- * cached "database" property still read "default", silently routing
- * every subsequent query to the wrong database. */
 $ch = new ClickHouse(clickhouse_test_config() + ["database" => "sc_db127"]);
 var_dump($ch->select("SELECT currentDatabase() AS d")[0]["d"]);
 $ch->setDatabase("default");

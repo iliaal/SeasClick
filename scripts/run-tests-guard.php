@@ -80,10 +80,8 @@ if (preg_match('/Tests warned\s*:\s*([0-9]+)/', $output, $warnedMatches) &&
     fwrite(STDERR, "PHPT guard: the test run reported warned tests\n");
     exit(1);
 }
-/* REQUIRED_PHPT_TESTS (space-separated, e.g. "tests/051.phpt"): re-run each
- * one explicitly and require a pass, so a required offline smoke cannot be
- * masked by an all-skip summary. Consumed by the Windows lane, where the
- * server suite skips and 051 is the proof the .dll actually works. */
+/* Require explicit passes for REQUIRED_PHPT_TESTS so all-skip runs cannot
+ * mask a missing Windows smoke test. */
 $required = trim((string)getenv("REQUIRED_PHPT_TESTS"));
 if ($required !== "") {
     foreach (preg_split('/\s+/', $required) as $requiredTest) {

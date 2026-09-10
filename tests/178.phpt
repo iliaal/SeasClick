@@ -8,10 +8,7 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// ClickHouse echoes the bound value in a type-parse error ("Value <X> cannot
-// be parsed as <Type> ..."), ahead of the SQL markers the sanitizer cuts on,
-// so a secret-looking parameter leaked into the exception message. The value
-// fragment is now redacted.
+// Parameter parse errors echo values before execution markers.
 
 $c = new ClickHouse(clickhouse_test_config());
 

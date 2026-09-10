@@ -14,8 +14,6 @@ $c->execute("DROP TABLE IF EXISTS test.dt64_t");
 $c->execute("CREATE TABLE test.dt64_t (id UInt32, ts DateTime64(3, 'UTC'), ts6 DateTime64(6, 'UTC')) ENGINE = Memory");
 
 // Pass plain epoch seconds (int); the lib scales by 10^precision internally.
-// Only ints here; "Y-m-d H:i:s" string input goes through mktime which
-// is host-TZ-dependent and would make the test flaky.
 $c->insert("test.dt64_t", ["id", "ts", "ts6"], [
     [1, 1714000000, 1714000000],
     [2, 1745515200, 1745515200],

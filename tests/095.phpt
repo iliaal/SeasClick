@@ -21,7 +21,6 @@ $c->insert("test.ext_users", ["id", "name"], [
     [99, "nope"],
 ]);
 
-// 1. Filter against a 3-row external table.
 $rows = $c->selectWithExternalData(
     "SELECT id, name FROM test.ext_users WHERE id IN ext_ids ORDER BY id",
     [
@@ -34,7 +33,6 @@ $rows = $c->selectWithExternalData(
 );
 foreach ($rows as $r) echo "row: {$r['id']} {$r['name']}\n";
 
-// 2. Same shape, FETCH_COLUMN flatten.
 $ids = $c->selectWithExternalData(
     "SELECT id FROM test.ext_users WHERE id IN ext_ids ORDER BY id",
     [
@@ -48,7 +46,6 @@ $ids = $c->selectWithExternalData(
 );
 echo "ids: " . implode(",", $ids) . "\n";
 
-// 3. Query_id propagation surfaces in getStatistics.
 $c->selectWithExternalData(
     "SELECT count() FROM test.ext_users WHERE id IN ext_ids",
     [
@@ -63,7 +60,6 @@ $c->selectWithExternalData(
 $st = $c->getStatistics();
 echo "qid: {$st['query_id']}\n";
 
-// 4. Sanity: same handle still does plain select().
 $cnt = $c->select("SELECT count() FROM test.ext_users", [], ClickHouse::FETCH_ONE);
 echo "rowcount: $cnt\n";
 

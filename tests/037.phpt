@@ -9,7 +9,6 @@ clickhouse
 require __DIR__ . "/_clickhouse.inc";
 $c = new ClickHouse(clickhouse_test_config());
 
-// Progress callback collects rows seen across all packets.
 $seen_rows = 0;
 $call_count = 0;
 $c->setProgressCallback(function (array $p) use (&$seen_rows, &$call_count) {
@@ -28,12 +27,10 @@ echo "stat bytes>0: ",      ($stats["bytes_read"] > 0 ? "yes" : "no"), "\n";
 echo "stat blocks>=1: ",    ($stats["blocks"] >= 1 ? "yes" : "no"), "\n";
 echo "stat elapsed>0: ",    ($stats["elapsed_ms"] > 0 ? "yes" : "no"), "\n";
 
-// Stats reset on each call.
 $c->select("SELECT 1");
 $stats = $c->getStatistics();
 echo "after small: rows<10: ", ($stats["rows_read"] < 10 ? "yes" : "no"), "\n";
 
-// Removing the callback works.
 $c->setProgressCallback(null);
 $call_count = 0;
 $c->select("SELECT count() FROM numbers(100000)");

@@ -25,9 +25,6 @@ $c->insert("test.ext_events", ["id", "tag", "ts", "note"], [
     [5, "beta",  "2026-03-01", null],
 ]);
 
-// Two external tables joined into one query. The query body filters by
-// both an ID set and a tag set; the server resolves each against its
-// own external table.
 $rows = $c->selectWithExternalData(
     "SELECT id, tag, ts, note FROM test.ext_events
      WHERE id IN ext_ids AND tag IN ext_tags
@@ -51,7 +48,6 @@ foreach ($rows as $r) {
     echo "row: {$r['id']} {$r['tag']} {$r['ts']} $note\n";
 }
 
-// Multi-column external table — pair lookup of (tag, ts).
 $rows = $c->selectWithExternalData(
     "SELECT id, tag, ts FROM test.ext_events
      WHERE (tag, ts) IN (SELECT tag, ts FROM ext_pairs)

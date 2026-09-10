@@ -8,34 +8,22 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for round-14-followup CR-001: when EndInsert() failed
-// because the server rejected the data (e.g. a CHECK constraint
-// violation), the wrapper threw the exception but left the vendored
-// client's inserting_ flag set. Every subsequent select/execute on
-// that handle then threw "cannot execute query while inserting"
-// until userland called resetConnection() by hand. Both the direct
-// insert() finalize path and writeEnd() now ResetConnection() on
-// EndInsert failure so the handle stays usable.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.insert_constraint");
 $c->execute("CREATE TABLE test.insert_constraint (id UInt32, CONSTRAINT positive CHECK id > 0) ENGINE=Memory");
 
-// Path 1: direct insert(). Server-side rejection during finalize.
 try {
     $c->insert("test.insert_constraint", ["id"], [[1], [2], [0], [3]]);
     echo "direct insert: NO THROW\n";
 } catch (ClickHouseException $e) {
     echo "direct insert: REJECTED\n";
 }
-// Same handle must be usable without resetConnection().
 $x = $c->select("SELECT 41 AS x", [], ClickHouse::FETCH_ONE);
 echo "select after direct insert error: $x\n";
 
-// Path 2: streaming write() + writeEnd(). Constraint trips at
-// writeEnd() because the block hasn't been finalized server-side
-// until then.
+// The CHECK constraint is evaluated at writeEnd, after block transmission.
 $c->writeStart("test.insert_constraint", ["id"]);
 $c->write([[1], [2]]);
 $c->write([[0]]);
@@ -48,7 +36,6 @@ try {
 $x = $c->select("SELECT 42 AS x", [], ClickHouse::FETCH_ONE);
 echo "select after writeEnd error: $x\n";
 
-// Path 3: a fresh streaming cycle on the same handle still works.
 $c->writeStart("test.insert_constraint", ["id"]);
 $c->write([[10], [20], [30]]);
 $c->writeEnd();

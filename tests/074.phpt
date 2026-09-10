@@ -8,13 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-003: appendIntColumn / appendUIntColumnWithHex /
-// appendFloatColumn used zval_get_long / zval_get_double, which silently
-// coerce "abc" → 0, [] → 1, and accept fractional / NaN / Inf doubles
-// for integer columns. Hex literals "0x100000000" silently truncated to
-// UInt32 0. The strict_zval_long / strict_zval_double helpers reject
-// non-numeric strings, fractional doubles for ints, and non-finite
-// doubles; the hex path width-checks against MaxV.
 
 $c = new ClickHouse(clickhouse_test_config());
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
@@ -45,7 +38,6 @@ foreach ($probes as $label => [$cols, $vals]) {
     catch (ClickHouseException $e) { echo "$label: REJECTED\n"; }
 }
 
-// Sanity: well-formed values still land.
 $c->insert("test.coerce", ['i32', 'u32', 'u64', 'f32', 'f64'],
     [[42, 4000000000, '0xDEADBEEFCAFEBABE', 1.5, 2.5]]);
 $rows = $c->select("SELECT count() FROM test.coerce", [], ClickHouse::FETCH_ONE);

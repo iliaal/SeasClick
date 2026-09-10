@@ -13,9 +13,6 @@ $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("DROP TABLE IF EXISTS test.from_csv");
 $c->execute("CREATE TABLE test.from_csv (id UInt32, s String) ENGINE=Memory");
 
-// CSV with: plain cell, quoted cell with comma, quoted cell with embedded
-// double-quote (""), quoted cell containing a CRLF newline, mixed line
-// endings (LF and CRLF rows in one file), and an empty quoted cell.
 $payload =
     "1,plain\r\n" .
     "2,\"with,comma\"\r\n" .
@@ -36,7 +33,6 @@ foreach ($c->select("SELECT id, s FROM test.from_csv ORDER BY id") as $r) {
     echo "row {$r['id']}: '$vis'\n";
 }
 
-// CSVWithNames — first row discarded.
 $c->execute("TRUNCATE TABLE test.from_csv");
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "id,s\r\n100,first\r\n200,second\r\n");

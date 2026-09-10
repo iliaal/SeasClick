@@ -8,17 +8,6 @@ clickhouse
 <?php
 require __DIR__ . "/_clickhouse.inc";
 
-// Regression for CR-502: selectStreamCallback's OnData closure was the
-// only call_user_function site that didn't re-raise on EG(exception).
-// The other three (progress / profile / verbose) all check and throw
-// to abort the packet loop. Without this check, a row callback that
-// threw left the exception buffered while the stream kept consuming
-// rows and recordQuerySuccess was still invoked. The fix mirrors the
-// progress/profile/verbose pattern.
-//
-// Verify: a callback that throws on row 3 of 1000 stops at 3, the user
-// exception surfaces at the call site, and getStatistics()/last error
-// reflect the failure (not a "successful" row count).
 
 $c = new ClickHouse(clickhouse_test_config());
 

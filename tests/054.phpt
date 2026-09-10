@@ -10,21 +10,15 @@ require __DIR__ . "/_clickhouse.inc";
 
 $c = new ClickHouse(clickhouse_test_config());
 
-// setSettings now returns $this; chaining works.
 $ret = $c->setSettings(["max_threads" => "1"]);
 var_dump($ret === $c);
 
-// setSetting (singular) is chainable too. Combine multiple calls.
 $ret = $c->setSetting("max_block_size", 4096)->setSetting("max_threads", 2);
 var_dump($ret === $c);
 
-// Settings actually got applied: SELECT one of them through a per-query
-// settings probe to confirm the per-client override is in effect.
 $mt = $c->select("SELECT getSetting('max_threads')", [], ClickHouse::FETCH_ONE);
 echo "max_threads=", $mt, "\n";
 
-// setDatabase issues USE and updates the cached default. Use that for a
-// helper that consults the cache (databaseSize defaults to current DB).
 $c->execute("CREATE DATABASE IF NOT EXISTS test");
 $c->execute("CREATE DATABASE IF NOT EXISTS test_054_alt");
 $c->execute("DROP TABLE IF EXISTS test_054_alt.t");
@@ -34,11 +28,9 @@ $ret = $c->setDatabase("test_054_alt");
 var_dump($ret === $c);
 $cur = $c->select("SELECT currentDatabase()", [], ClickHouse::FETCH_ONE);
 echo "currentDatabase=", $cur, "\n";
-// showTables() with no arg uses the cached default; should now list the alt DB.
 $tables = $c->showTables();
 echo "showTables_count=", count($tables), " has_t=", (in_array("t", $tables) ? "yes" : "no"), "\n";
 
-// setDatabase rejects malformed identifiers.
 try {
     $c->setDatabase("bad; DROP DATABASE test");
     echo "setDatabase: NO EXCEPTION (BUG)\n";
@@ -46,11 +38,9 @@ try {
     echo "setDatabase rejected: yes\n";
 }
 
-// Switch back, drop the temp DB.
 $c->setDatabase("test");
 $c->execute("DROP DATABASE test_054_alt");
 
-// Exception getters mirror the public properties.
 try {
     $c->execute("THIS IS NOT VALID SQL");
 } catch (ClickHouseException $e) {

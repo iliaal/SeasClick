@@ -75,18 +75,9 @@ std::string sqlQuotedIdentifier(const std::string &s)
     return out;
 }
 
-/*
- * Shared identifier parser behind validateIdentifier (check-only,
- * emit_out == nullptr) and the INSERT SQL builder (emit mode). A segment
- * is either bare ([A-Za-z_][A-Za-z0-9_]*) or backtick-quoted (`...`,
- * with \` and \\ escapes), so names ClickHouse allows but bare syntax
- * rejects (my-table, my col) can be addressed. Dots inside backticks are
- * literal; a bare dot separates the optional database prefix (at most
- * one, only when allow_dot). In emit mode bare segments pass through
- * verbatim — unquoted-path SQL is byte-identical to before — and quoted
- * segments are re-emitted via sqlQuotedIdentifier. Bare-path error
- * messages are unchanged.
- */
+/* Bare or backtick-quoted segments; dots inside quotes are literal.
+ * allow_dot permits one database separator. emit_out == nullptr validates
+ * only; emit mode preserves bare segments and re-quotes quoted ones. */
 void parseIdentifier(const char *s, size_t len, const char *what,
                      bool allow_dot, std::string *emit_out)
 {
@@ -189,12 +180,6 @@ std::string currentDatabase(zval *this_obj)
     return std::string("default");
 }
 
-/*
- * SQL-helper one-liners. Each builds a small SELECT and reuses the
- * select() machinery directly through do_select_into / do_execute_into
- * so settings, progress, stats, and the verbose trace surface apply
- * exactly the same as on the user-visible select() / execute().
- */
 void runHelperSelect(zval *return_value, zval *this_obj, const std::string &sql, zend_long fetch_mode)
 {
     do_select_into(return_value, this_obj, sql.c_str(), sql.size(),
@@ -210,20 +195,13 @@ bool runHelperExec(zval *this_obj, const std::string &sql)
     return !EG(exception);
 }
 
-/*
- * Return the first row of a helper result as an assoc array, or
- * an empty array if there were no rows.
- */
 void runHelperSelectFirstRow(zval *return_value, zval *this_obj, const std::string &sql)
 {
     zval rows;
     ZVAL_UNDEF(&rows);
     runHelperSelect(&rows, this_obj, sql, 0);
     if (EG(exception)) {
-        /* do_select_into array_init's the out zval before dispatching the
-         * query, so a mid-stream failure leaves an initialized (possibly
-         * populated) array that the early return would otherwise leak in a
-         * long-running worker. Pre-array_init throws leave rows IS_UNDEF. */
+        /* Failure may leave a partially populated rows array, or UNDEF before initialization. */
         if (Z_TYPE(rows) != IS_UNDEF) {
             zval_ptr_dtor(&rows);
         }
@@ -303,10 +281,7 @@ PHP_METHOD(ClickHouse, partitions)
     ZEND_PARSE_PARAMETERS_END();
     std::string tname(ZSTR_VAL(table), ZSTR_LEN(table));
     std::string dbname = currentDatabase(getThis());
-    /* Allow `db.table` in the argument; split on the LAST dot so
-     * `db.tbl` resolves with dbname=`db`. A residual dot in either half
-     * (`a.b.c`) is rejected rather than silently matched against a
-     * dotted literal that can never be a real database/table pair. */
+    /* Permit one db.table separator; reject residual dots in either component. */
     auto dot = tname.rfind('.');
     if (dot != std::string::npos) {
         dbname = tname.substr(0, dot);
@@ -401,14 +376,7 @@ PHP_METHOD(ClickHouse, isExists)
         Z_PARAM_STR(db)
         Z_PARAM_STR(table)
     ZEND_PARSE_PARAMETERS_END();
-    /* db / table are compared as string VALUES against system.tables, not
-     * interpolated as identifiers, so escape them as string literals rather
-     * than rejecting any name that isn't a bare identifier. This admits the
-     * quoted/special-character names ClickHouse allows (e.g. `my-table`) and
-     * is injection-safe (sqlStringLiteral escapes quotes/backslashes/NUL).
-     * Matches showTables(), which already filters by a string literal.
-     * (showCreateTable keeps strict identifier validation: there the name is
-     * interpolated as an identifier, not compared as a value.) */
+    /* Compare names as string values so special-character identifiers remain valid. */
     std::string sql =
         "SELECT count() AS c FROM system.tables WHERE database = " +
         sqlStringLiteral(std::string(ZSTR_VAL(db), ZSTR_LEN(db))) +
@@ -567,7 +535,6 @@ PHP_METHOD(ClickHouse, dropPartition)
         throwClickHouseError(e);
         return;
     }
-    /* Guard against control characters that could break the literal. */
     for (size_t i = 0; i < ZSTR_LEN(part); ++i) {
         unsigned char c = (unsigned char)ZSTR_VAL(part)[i];
         if (c < 0x20) {

@@ -22,7 +22,6 @@ function probe(string $label, callable $fn): void {
     }
 }
 
-// 1. Bad format.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\talice\n");
 rewind($mem);
@@ -36,19 +35,16 @@ fclose($mem);
 probe("not-a-stream", fn() =>
     @$c->insertFromStream("test.bad_stream", ["id", "name"], "not a stream"));
 
-// 3. batch_rows <= 0.
 $mem = fopen("php://memory", "w+b");
 probe("zero-batch", fn() =>
     $c->insertFromStream("test.bad_stream", ["id", "name"], $mem, "TSV", 0));
 fclose($mem);
 
-// 4. Empty columns list.
 $mem = fopen("php://memory", "w+b");
 probe("no-columns", fn() =>
     $c->insertFromStream("test.bad_stream", [], $mem));
 fclose($mem);
 
-// 5. Wrong cell count in a row.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1\talice\n2\textra\tcolumn\textra\n");
 rewind($mem);
@@ -56,7 +52,6 @@ probe("row-too-wide", fn() =>
     $c->insertFromStream("test.bad_stream", ["id", "name"], $mem));
 fclose($mem);
 
-// 6. Unterminated quoted cell in CSV.
 $mem = fopen("php://memory", "w+b");
 fwrite($mem, "1,\"never-closed\n");
 rewind($mem);
